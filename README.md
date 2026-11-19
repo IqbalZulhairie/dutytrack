@@ -1,36 +1,47 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Duty Track
 
-## Getting Started
+Duty Track is a cleaning-duty dashboard for office teams. From the home page, admins can:
 
-First, run the development server:
+- View today's assigned team, upcoming duties, and duty completion progress.
+- Manage staff profiles and activate or deactivate team members.
+- Create, edit, and remove cleaning assignments in daily, weekly, or monthly views. Each assignment requires at least two active staff members.
+- Check off cleaning tasks for a selected duty date.
+- Preview the planned 8:00 AM duty reminder email.
+
+## Run locally
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Current prototype limitations
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Staff, schedules, and checklist progress are stored in the browser's local storage. The app does not yet synchronize data across users or devices. The reminder page is a preview only: actual email delivery, an email provider, and a server-side scheduler must be configured before automatic notifications can be sent.
 
-## Learn More
+## Send a test email
 
-To learn more about Next.js, take a look at the following resources:
+For local testing, add these values to `.env.local` (never commit the Resend API key):
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```env
+RESEND_API_KEY=your_resend_api_key
+RESEND_TEST_RECIPIENT=your_test_address@example.com
+# Optional; use a sender verified in Resend for your account.
+RESEND_FROM_EMAIL=onboarding@resend.dev
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Restart the dev server, open `/admin/user/resend`, and click **Send one test email**. The test only sends after the button is submitted, only to `RESEND_TEST_RECIPIENT`, and is disabled in production. It sends immediately and does not create or schedule a cleaning duty.
 
-## Deploy on Vercel
+## Configure sign-in and user registration
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+The login and registration pages use Supabase Auth. User registration also creates a matching row in `profiles`; if that insert fails, the newly created Auth user is removed.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Add the Supabase service-role key to the server environment (do not use a `NEXT_PUBLIC_` prefix and never expose this key in browser code):
+
+```env
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+```
+
+Before registration can be used, create the first Auth user in the Supabase dashboard so someone can sign in. No profile is required for that initial account. Any signed-in user can use the registration form, but the server only permits creating accounts with the `staff` role. Restart the app after changing environment variables.
