@@ -3,7 +3,6 @@
 import { useActionState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { registerUser, type RegisterUserState } from "./actions";
-import RoleSelect from "./role-select";
 
 const initialState: RegisterUserState = { status: "idle", message: "" };
 
@@ -37,12 +36,7 @@ export default function RegisterUserForm() {
       </div>
 
       <div>
-        <label htmlFor="role" className="mb-2 block text-sm font-medium text-slate-200">Role</label>
-        <RoleSelect />
-      </div>
-
-      <div>
-        <label htmlFor="password" className="mb-2 block text-sm font-medium text-slate-200">Temporary password</label>
+        <label htmlFor="password" className="mb-2 block text-sm font-medium text-slate-200">Password</label>
         <input id="password" name="password" type="password" autoComplete="new-password" minLength={8} required className={inputClassName()} />
       </div>
 

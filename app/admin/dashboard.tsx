@@ -5,8 +5,9 @@ import type { FormEvent, ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { registerUser } from "./user/actions";
 
-type Staff = { id: string; name: string; email: string; active: boolean };
+type Staff = { id: string; name: string; email: string; staffId?: string; active: boolean };
 type CleaningTask = { id: string; label: string };
 type Duty = { id: string; date: string; staffIds: string[]; completedTaskIds: string[] };
 type Store = { staff: Staff[]; duties: Duty[]; tasks: CleaningTask[] };
@@ -133,6 +134,8 @@ export default function Dashboard() {
   const [dutyModal, setDutyModal] = useState<DutyDraft | null>(null);
   const [staffModal, setStaffModal] = useState<Staff | "new" | null>(null);
   const [staffSearch, setStaffSearch] = useState("");
+  const [staffFormMessage, setStaffFormMessage] = useState("");
+  const [isSavingStaff, setIsSavingStaff] = useState(false);
   const [toast, setToast] = useState("");
   const [isLoggingOut, setIsLoggingOut] = useState(false);
 
@@ -166,6 +169,10 @@ export default function Dashboard() {
     const timer = window.setTimeout(() => setToast(""), 3000);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    setStaffFormMessage("");
+  }, [staffModal]);
 
   const todayDuty = store.duties.find((duty) => duty.date === today);
   const activeStaff = store.staff.filter((person) => person.active);
@@ -250,20 +257,45 @@ export default function Dashboard() {
     setToast("Cleaning duty removed.");
   }
 
-  function saveStaff(event: FormEvent<HTMLFormElement>) {
+  async function saveStaff(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    const name = String(data.get("name") ?? "").trim();
+    const name = String(data.get("fullName") ?? "").trim();
     const email = String(data.get("email") ?? "").trim();
     if (!name || !email) return;
     if (staffModal === "new") {
-      setStore((current) => ({ ...current, staff: [...current.staff, { id: crypto.randomUUID(), name, email, active: true }] }));
-      setToast("Staff member added.");
-    } else if (staffModal) {
+      setIsSavingStaff(true);
+      try {
+        const result = await registerUser({ status: "idle", message: "" }, data);
+        const createdUser = result.createdUser;
+        if (result.status !== "success" || !createdUser) {
+          setStaffFormMessage(result.message || "Unable to register the staff account.");
+          return;
+        }
+        setStore((current) => ({
+          ...current,
+          staff: [...current.staff, {
+            id: createdUser.id,
+            name: createdUser.fullName,
+            email: createdUser.email,
+            staffId: createdUser.staffId,
+            active: true,
+          }],
+        }));
+        setToast(result.message);
+        setStaffModal(null);
+      } catch (error) {
+        setStaffFormMessage(error instanceof Error ? error.message : "Unable to register the staff account.");
+      } finally {
+        setIsSavingStaff(false);
+      }
+      return;
+    }
+    if (staffModal) {
       setStore((current) => ({ ...current, staff: current.staff.map((person) => person.id === staffModal.id ? { ...person, name, email } : person) }));
       setToast("Staff details updated.");
+      setStaffModal(null);
     }
-    setStaffModal(null);
   }
 
   function toggleStaff(person: Staff) {
@@ -528,9 +560,15 @@ export default function Dashboard() {
 
       {staffModal && <Modal title={staffModal === "new" ? "Add staff member" : "Edit staff member"} onClose={() => setStaffModal(null)}>
         <form key={staffModal === "new" ? "new" : staffModal.id} onSubmit={saveStaff} className="space-y-4">
-          <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Full name</span><input name="name" required defaultValue={staffModal === "new" ? "" : staffModal.name} placeholder="e.g. Alex Morgan" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
-          <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Work email</span><input name="email" required type="email" defaultValue={staffModal === "new" ? "" : staffModal.email} placeholder="alex@company.com" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
-          <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" onClick={() => setStaffModal(null)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button type="submit" className="rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d]">{staffModal === "new" ? "Add staff member" : "Save changes"}</button></div>
+          <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Full name</span><input name="fullName" required maxLength={120} autoComplete="name" defaultValue={staffModal === "new" ? "" : staffModal.name} placeholder="e.g. Alex Morgan" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
+          {staffModal === "new" && <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Staff ID</span><input name="staffId" required maxLength={50} placeholder="e.g. S001" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>}
+          <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Email</span><input name="email" required type="email" autoComplete="email" defaultValue={staffModal === "new" ? "" : staffModal.email} placeholder="alex@company.com" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
+          {staffModal === "new" && <>
+            <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Password</span><input name="password" required type="password" minLength={8} autoComplete="new-password" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
+            <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Confirm password</span><input name="confirmPassword" required type="password" minLength={8} autoComplete="new-password" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
+          </>}
+          {staffFormMessage && <p role="alert" className="rounded-xl border border-rose-100 bg-rose-50 px-3.5 py-3 text-xs text-rose-700">{staffFormMessage}</p>}
+          <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" disabled={isSavingStaff} onClick={() => setStaffModal(null)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60">Cancel</button><button type="submit" disabled={isSavingStaff} className="rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d] disabled:cursor-not-allowed disabled:opacity-60">{isSavingStaff ? "Creating account..." : staffModal === "new" ? "Create staff account" : "Save changes"}</button></div>
         </form>
       </Modal>}
       {toast && <div role="status" className="fixed bottom-20 left-1/2 z-50 -translate-x-1/2 rounded-xl bg-[#172543] px-4 py-3 text-xs font-semibold text-white shadow-xl lg:bottom-6">{toast}</div>}

@@ -6,6 +6,7 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 export type RegisterUserState = {
   status: "idle" | "success" | "error";
   message: string;
+  createdUser?: { id: string; fullName: string; staffId: string; email: string };
 };
 
 function readField(formData: FormData, name: string, trim = true) {
@@ -32,10 +33,35 @@ export async function registerUser(
   }
 
   const adminClient = createSupabaseAdminClient();
+  const { data: currentProfile, error: currentProfileError } = await adminClient
+    .from("profiles")
+    .select("role_id")
+    .eq("id", authData.user.id)
+    .maybeSingle();
+
+  if (currentProfileError) {
+    return { status: "error", message: `Could not verify your account permissions: ${currentProfileError.message}` };
+  }
+  if (!currentProfile) {
+    return { status: "error", message: "Your account profile could not be verified." };
+  }
+
+  const { data: currentRole, error: currentRoleError } = await adminClient
+    .from("roles")
+    .select("role_name")
+    .eq("id", currentProfile.role_id)
+    .maybeSingle();
+
+  if (currentRoleError) {
+    return { status: "error", message: `Could not verify your account role: ${currentRoleError.message}` };
+  }
+  if (!currentRole || !["admin", "administrator"].includes(currentRole.role_name.toLowerCase())) {
+    return { status: "error", message: "Only administrators can register staff accounts." };
+  }
+
   const fullName = readField(formData, "fullName");
   const staffId = readField(formData, "staffId");
   const email = readField(formData, "email").toLowerCase();
-  const roleId = Number(readField(formData, "role_id"));
   const password = readField(formData, "password", false);
   const confirmPassword = readField(formData, "confirmPassword", false);
 
@@ -48,9 +74,6 @@ export async function registerUser(
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return { status: "error", message: "Enter a valid email address." };
   }
-  if (!Number.isInteger(roleId) || roleId <= 0) {
-    return { status: "error", message: "Select a valid role." };
-  }
   if (password.length < 8) {
     return { status: "error", message: "Password must contain at least 8 characters." };
   }
@@ -61,14 +84,14 @@ export async function registerUser(
   const { data: selectedRole, error: selectedRoleError } = await adminClient
     .from("roles")
     .select("id, role_name")
-    .eq("id", roleId)
+    .ilike("role_name", "staff")
     .maybeSingle();
 
   if (selectedRoleError) {
-    return { status: "error", message: `Could not verify the selected role: ${selectedRoleError.message}` };
+    return { status: "error", message: `Could not verify the staff role: ${selectedRoleError.message}` };
   }
   if (!selectedRole) {
-    return { status: "error", message: "The selected role no longer exists. Refresh and choose a role again." };
+    return { status: "error", message: "The staff role is not configured. Contact your administrator." };
   }
   if (selectedRole.role_name.toLowerCase() !== "staff") {
     return { status: "error", message: "Only staff accounts can be registered through this form." };
@@ -110,5 +133,9 @@ export async function registerUser(
     };
   }
 
-  return { status: "success", message: `${fullName} was registered successfully.` };
+  return {
+    status: "success",
+    message: `${fullName} was registered successfully.`,
+    createdUser: { id: createdAuthUser.user.id, fullName, staffId, email },
+  };
 }
