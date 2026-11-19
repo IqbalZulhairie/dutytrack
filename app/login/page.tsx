@@ -3,71 +3,66 @@ import LoginForm from "./login-form";
 
 export default function LoginPage() {
   return (
-    <main className="relative flex min-h-screen items-center justify-center overflow-hidden bg-slate-950 px-4 py-10 text-slate-50 sm:px-6">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_15%_20%,_rgba(34,211,238,0.16),_transparent_35%),radial-gradient(circle_at_85%_80%,_rgba(99,102,241,0.18),_transparent_35%)]" />
+    <main className="relative min-h-screen overflow-hidden bg-[#f3f5f8] text-[#101b36]">
+      <div className="pointer-events-none absolute -left-28 -top-28 h-72 w-72 rounded-full bg-[#b8f26b]/25 blur-3xl" />
+      <div className="pointer-events-none absolute -bottom-24 right-[-4rem] h-80 w-80 rounded-full bg-[#9aaaf6]/20 blur-3xl" />
 
-      <div className="relative grid w-full max-w-5xl overflow-hidden rounded-[2rem] border border-slate-800 bg-slate-900/80 shadow-2xl shadow-cyan-950/30 backdrop-blur md:min-h-[640px] md:grid-cols-2">
-        <section className="hidden flex-col justify-between bg-gradient-to-br from-cyan-500/15 via-slate-900 to-indigo-500/15 p-10 md:flex lg:p-12">
-          <Link href="/" className="flex w-fit items-center gap-3" aria-label="Duty Track home">
-            <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-300 to-blue-600 text-sm font-black text-slate-950 shadow-lg shadow-cyan-500/25">
-              DT
-            </span>
-            <span className="text-xl font-bold tracking-tight text-white">Duty Track</span>
-          </Link>
-
-          <div className="max-w-md">
-            <p className="text-sm font-semibold uppercase tracking-[0.24em] text-cyan-300">
-              Work with clarity
-            </p>
-            <h1 className="mt-5 text-4xl font-black leading-tight text-white lg:text-5xl">
-              Your team&apos;s next great result starts here.
-            </h1>
-            <p className="mt-5 leading-7 text-slate-300">
-              Sign in to organize your duties, follow team progress, and keep every deadline in sight.
-            </p>
-
-            <div className="mt-10 rounded-2xl border border-white/10 bg-white/[0.04] p-5">
-              <div className="flex items-center gap-3">
-                <span className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-400/15 text-emerald-300" aria-hidden="true">
-                  ✓
-                </span>
-                <div>
-                  <p className="font-semibold text-white">Everything in one place</p>
-                  <p className="mt-1 text-sm text-slate-400">Tasks, priorities, and progress at a glance.</p>
-                </div>
-              </div>
+      <div className="relative mx-auto flex min-h-screen w-full max-w-[1200px] items-center px-5 py-8 sm:px-8 lg:px-12">
+        <div className="grid w-full overflow-hidden rounded-[28px] border border-[#dde3ed] bg-white shadow-[0_24px_70px_-32px_rgba(16,27,54,0.28)] lg:min-h-[680px] lg:grid-cols-[1.08fr_.92fr]">
+          <section className="relative hidden overflow-hidden bg-[#101b36] p-12 lg:flex lg:flex-col">
+            <div className="absolute inset-0 opacity-[0.08]" style={{ backgroundImage: "radial-gradient(circle at 1px 1px, white 1px, transparent 0)", backgroundSize: "24px 24px" }} />
+            <div className="relative">
+              <Link href="/" className="flex w-fit items-center gap-3" aria-label="Duty Track home">
+                <span className="flex h-11 w-11 items-center justify-center rounded-[13px] bg-[#b8f26b] text-sm font-black text-[#101b36]">DT</span>
+                <span className="text-xl font-bold tracking-tight text-white">dutytrack<span className="text-[#b8f26b]">.</span></span>
+              </Link>
             </div>
-          </div>
 
-          <p className="text-xs text-slate-500">Plan clearly. Deliver confidently.</p>
-        </section>
+            <div className="relative my-auto max-w-md py-12">
+              <div className="mb-7 flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.07]">
+                <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6 text-[#b8f26b]" aria-hidden="true">
+                  <path d="M8 12.5l2.2 2.2L16.5 8.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </div>
+              <p className="mb-4 text-xs font-bold uppercase tracking-[0.22em] text-[#b8f26b]">One workspace</p>
+              <h1 className="text-[42px] font-semibold leading-[1.08] tracking-[-0.04em] text-white">
+                Keep every duty on track.
+              </h1>
+              <p className="mt-5 max-w-sm text-[15px] leading-7 text-slate-400">
+                Organize schedules, support your team, and know exactly what needs attention.
+              </p>
+            </div>
 
-        <section className="flex items-center justify-center p-6 sm:p-10 lg:p-12">
-          <div className="w-full max-w-sm">
-            <Link href="/" className="mb-10 flex w-fit items-center gap-3 md:hidden" aria-label="Duty Track home">
-              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-300 to-blue-600 text-sm font-black text-slate-950">
-                DT
-              </span>
-              <span className="text-lg font-bold text-white">Duty Track</span>
-            </Link>
+            <div className="relative flex items-center gap-3 border-t border-white/10 pt-6 text-xs text-slate-400">
+              <span className="h-2 w-2 rounded-full bg-[#b8f26b] shadow-[0_0_12px_rgba(184,242,107,.65)]" />
+              Workspace services operational
+            </div>
+          </section>
 
-            <p className="text-sm font-medium text-cyan-300">Welcome back</p>
-            <h2 className="mt-2 text-3xl font-bold tracking-tight text-white">Sign in to your account</h2>
-            <p className="mt-3 text-sm leading-6 text-slate-400">
-              Enter your details below to continue to your workspace.
-            </p>
+          <section className="flex min-h-[620px] items-center justify-center px-6 py-10 sm:px-12 lg:min-h-0 lg:px-14">
+            <div className="w-full max-w-[390px]">
+              <Link href="/" className="mb-12 flex w-fit items-center gap-3 lg:hidden" aria-label="Duty Track home">
+                <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#101b36] text-sm font-black text-[#b8f26b]">DT</span>
+                <span className="text-lg font-bold tracking-tight text-[#101b36]">dutytrack<span className="text-[#79a93e]">.</span></span>
+              </Link>
 
-            <LoginForm />
+              <p className="mb-3 text-xs font-bold uppercase tracking-[0.18em] text-[#66873a]">Welcome back</p>
+              <h2 className="text-[34px] font-semibold leading-tight tracking-[-0.035em] text-[#101b36]">Sign in to your workspace</h2>
+              <p className="mt-3 text-sm leading-6 text-slate-500">
+                Enter your account details to continue.
+              </p>
 
-            <p className="mt-8 text-center text-sm text-slate-400">
-              Don&apos;t have an account?{" "}
-              <a href="mailto:support@dutytrack.app" className="font-semibold text-cyan-300 transition hover:text-cyan-200">
-                Contact your administrator
-              </a>
-            </p>
+              <LoginForm />
 
-          </div>
-        </section>
+              <p className="mt-8 text-center text-xs text-slate-500">
+                Need access?{" "}
+                <a href="mailto:support@dutytrack.app" className="font-bold text-[#101b36] underline decoration-[#b8f26b] decoration-2 underline-offset-4 transition hover:text-[#66873a]">
+                  Contact your administrator
+                </a>
+              </p>
+            </div>
+          </section>
+        </div>
       </div>
     </main>
   );
