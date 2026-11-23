@@ -1,5 +1,5 @@
 import Dashboard from "./dashboard";
 
 export default function Page() {
-  return <Dashboard />;
+  return <Dashboard section="Overview" />;
 }

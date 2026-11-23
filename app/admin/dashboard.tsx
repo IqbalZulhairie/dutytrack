@@ -8,19 +8,27 @@ import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { registerUser } from "./user/actions";
 
 type Staff = { id: string; name: string; email: string; staffId?: string; active: boolean };
-type CleaningTask = { id: string; label: string };
+type CleaningTask = { id: string; label: string; description: string; active: boolean };
 type Duty = { id: string; date: string; staffIds: string[]; completedTaskIds: string[] };
 type Store = { staff: Staff[]; duties: Duty[]; tasks: CleaningTask[] };
 type Section = "Overview" | "Schedule" | "Team" | "Checklist" | "Reminders";
 type DutyDraft = { id?: string; date: string; staffIds: string[] };
 
+const SECTION_ROUTES: Record<Section, string> = {
+  Overview: "/admin",
+  Schedule: "/admin/schedule",
+  Team: "/admin/team",
+  Checklist: "/admin/checklist",
+  Reminders: "/admin/reminders",
+};
+
 const STORAGE_KEY = "duty-track-workspace-v1";
 const DEFAULT_TASKS: CleaningTask[] = [
-  { id: "sweep", label: "Sweep and mop the floor" },
-  { id: "tables", label: "Wipe tables and shared surfaces" },
-  { id: "rubbish", label: "Empty bins and replace liners" },
-  { id: "kitchen", label: "Tidy the kitchen and wash dishes" },
-  { id: "supplies", label: "Restock cleaning supplies" },
+  { id: "sweep", label: "Sweep and mop the floor", description: "", active: true },
+  { id: "tables", label: "Wipe tables and shared surfaces", description: "", active: true },
+  { id: "rubbish", label: "Empty bins and replace liners", description: "", active: true },
+  { id: "kitchen", label: "Tidy the kitchen and wash dishes", description: "", active: true },
+  { id: "supplies", label: "Restock cleaning supplies", description: "", active: true },
 ];
 
 function dateKey(date: Date) {
@@ -123,9 +131,8 @@ function Avatar({ name, color = "bg-indigo-100 text-indigo-700", size = "h-9 w-9
   return <span className={`inline-flex shrink-0 items-center justify-center rounded-full text-xs font-bold ${size} ${color}`}>{initials(name)}</span>;
 }
 
-export default function Dashboard() {
+export default function Dashboard({ section }: { section: Section }) {
   const router = useRouter();
-  const [section, setSection] = useState<Section>("Overview");
   const [store, setStore] = useState<Store>(() => createSeed("2026-11-18"));
   const [ready, setReady] = useState(false);
   const [today, setToday] = useState("2026-11-18");
@@ -133,36 +140,169 @@ export default function Dashboard() {
   const [calendarMode, setCalendarMode] = useState<"Day" | "Week" | "Month">("Week");
   const [dutyModal, setDutyModal] = useState<DutyDraft | null>(null);
   const [staffModal, setStaffModal] = useState<Staff | "new" | null>(null);
+  const [taskModal, setTaskModal] = useState<CleaningTask | "new" | null>(null);
   const [staffSearch, setStaffSearch] = useState("");
   const [staffFormMessage, setStaffFormMessage] = useState("");
+  const [taskFormMessage, setTaskFormMessage] = useState("");
+  const [teamLoading, setTeamLoading] = useState(true);
+  const [teamError, setTeamError] = useState("");
+  const [tasksLoading, setTasksLoading] = useState(true);
+  const [tasksError, setTasksError] = useState("");
   const [isSavingStaff, setIsSavingStaff] = useState(false);
+  const [updatingStaffId, setUpdatingStaffId] = useState<string | null>(null);
+  const [isSavingTask, setIsSavingTask] = useState(false);
+  const [updatingTaskId, setUpdatingTaskId] = useState<string | null>(null);
   const [toast, setToast] = useState("");
   const [isLoggingOut, setIsLoggingOut] = useState(false);
 
   useEffect(() => {
+    let active = true;
     const frame = window.requestAnimationFrame(() => {
-      const currentDate = dateKey(new Date());
-      const saved = window.localStorage.getItem(STORAGE_KEY);
-      let loadedStore: Store | null = null;
-      if (saved) {
-        try {
-          const parsed = JSON.parse(saved) as Store;
-          if (Array.isArray(parsed.staff) && Array.isArray(parsed.duties) && Array.isArray(parsed.tasks)) loadedStore = parsed;
-        } catch {
-          window.localStorage.removeItem(STORAGE_KEY);
+      void (async () => {
+        const currentDate = dateKey(new Date());
+        const saved = window.localStorage.getItem(STORAGE_KEY);
+        let loadedStore: Store | null = null;
+        if (saved) {
+          try {
+            const parsed = JSON.parse(saved) as Store;
+            if (Array.isArray(parsed.staff) && Array.isArray(parsed.duties) && Array.isArray(parsed.tasks)) loadedStore = parsed;
+          } catch {
+            window.localStorage.removeItem(STORAGE_KEY);
+          }
         }
-      }
-      setStore(loadedStore ?? createSeed(currentDate));
-      setToday(currentDate);
-      setSelectedDate(currentDate);
-      setReady(true);
+        if (!active) return;
+
+        setStore(loadedStore ?? createSeed(currentDate));
+        setToday(currentDate);
+        setSelectedDate(currentDate);
+        setReady(true);
+
+        try {
+          const supabase = createSupabaseBrowserClient();
+          const { data: staffRoleRows, error: roleError } = await supabase
+            .from("roles")
+            .select("id")
+            .ilike("role_name", "staff");
+
+          if (roleError) throw new Error(`Could not load the staff role: ${roleError.message}`);
+
+          const staffRoleIds = (staffRoleRows ?? []).map((role) => role.id);
+          if (staffRoleIds.length === 0) {
+            if (active) setStore((current) => ({ ...current, staff: [] }));
+            return;
+          }
+
+          const { data: profiles, error: profilesError } = await supabase
+            .from("profiles")
+            .select("id, staff_id, full_name, email, is_active")
+            .in("role_id", staffRoleIds)
+            .order("full_name", { ascending: true });
+
+          if (profilesError) throw new Error(`Could not load team profiles: ${profilesError.message}`);
+          if (!profiles) throw new Error("Supabase returned no team profile data.");
+
+          const invalidProfile = profiles.some(
+            (profile) =>
+              typeof profile.id !== "string" ||
+              typeof profile.full_name !== "string" ||
+              typeof profile.email !== "string" ||
+              typeof profile.is_active !== "boolean",
+          );
+          if (invalidProfile) throw new Error("A staff profile is missing its ID, name, email, or active status.");
+
+          const staff: Staff[] = profiles.map((profile) => ({
+            id: profile.id,
+            name: profile.full_name,
+            email: profile.email,
+            staffId: typeof profile.staff_id === "string" ? profile.staff_id : undefined,
+            active: profile.is_active,
+          }));
+
+          if (active) setStore((current) => ({ ...current, staff }));
+        } catch (error) {
+          if (active) {
+            setTeamError(error instanceof Error ? error.message : "Could not load team profiles.");
+            setStore((current) => ({ ...current, staff: [] }));
+          }
+        } finally {
+          if (active) setTeamLoading(false);
+        }
+      })();
     });
-    return () => window.cancelAnimationFrame(frame);
+    return () => {
+      active = false;
+      window.cancelAnimationFrame(frame);
+    };
   }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    const params = new URLSearchParams(window.location.search);
+    const requestedDate = params.get("date");
+    const validDate = requestedDate && /^\d{4}-\d{2}-\d{2}$/.test(requestedDate) ? requestedDate : null;
+
+    if (validDate) setSelectedDate(validDate);
+    if (section === "Schedule" && params.get("newDuty") === "1") {
+      setDutyModal({ date: validDate ?? dateKey(new Date()), staffIds: [] });
+    }
+    if (params.has("date") || params.has("newDuty")) {
+      window.history.replaceState(null, "", SECTION_ROUTES[section]);
+    }
+  }, [ready, section]);
 
   useEffect(() => {
     if (ready) window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
   }, [ready, store]);
+
+  useEffect(() => {
+    if (!ready) return;
+    let active = true;
+
+    void (async () => {
+      try {
+        const supabase = createSupabaseBrowserClient();
+        const { data, error } = await supabase
+          .from("cleaning_tasks")
+          .select("id, task_name, description, is_active")
+          .order("task_name", { ascending: true });
+
+        if (error) throw new Error(`Could not load cleaning tasks: ${error.message}`);
+        if (!data) throw new Error("Supabase returned no cleaning task data.");
+
+        const invalidTask = data.some(
+          (task) =>
+            (typeof task.id !== "string" && typeof task.id !== "number") ||
+            typeof task.task_name !== "string" ||
+            (typeof task.description !== "string" && task.description !== null) ||
+            typeof task.is_active !== "boolean",
+        );
+        if (invalidTask) throw new Error("A cleaning task has invalid ID, name, description, or active status data.");
+
+        if (active) {
+          setStore((current) => ({
+            ...current,
+            tasks: data.map((task) => ({
+              id: String(task.id),
+              label: task.task_name,
+              description: task.description ?? "",
+              active: task.is_active,
+            })),
+          }));
+        }
+      } catch (error) {
+        if (active) {
+          setTasksError(error instanceof Error ? error.message : "Could not load cleaning tasks.");
+          setStore((current) => ({ ...current, tasks: [] }));
+        }
+      } finally {
+        if (active) setTasksLoading(false);
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [ready]);
 
   useEffect(() => {
     if (!toast) return;
@@ -174,14 +314,31 @@ export default function Dashboard() {
     setStaffFormMessage("");
   }, [staffModal]);
 
+  useEffect(() => {
+    setTaskFormMessage("");
+  }, [taskModal]);
+
   const todayDuty = store.duties.find((duty) => duty.date === today);
   const activeStaff = store.staff.filter((person) => person.active);
+  const activeTasks = store.tasks.filter((task) => task.active);
   const upcoming = useMemo(
     () => store.duties.filter((duty) => duty.date >= today).sort((a, b) => a.date.localeCompare(b.date)),
     [store.duties, today],
   );
-  const completedDutyCount = store.duties.filter((duty) => store.tasks.length > 0 && duty.completedTaskIds.length === store.tasks.length).length;
+  const completedDutyCount = store.duties.filter((duty) => activeTasks.length > 0 && activeTasks.every((task) => duty.completedTaskIds.includes(task.id))).length;
   const pendingDutyCount = store.duties.length - completedDutyCount;
+
+  function completedTaskCount(duty: Duty) {
+    return activeTasks.filter((task) => duty.completedTaskIds.includes(task.id)).length;
+  }
+
+  function navigateToSection(nextSection: Section, options?: { date?: string; newDuty?: boolean }) {
+    const params = new URLSearchParams();
+    if (options?.date) params.set("date", options.date);
+    if (options?.newDuty) params.set("newDuty", "1");
+    const query = params.toString();
+    router.push(`${SECTION_ROUTES[nextSection]}${query ? `?${query}` : ""}`);
+  }
 
   async function handleLogout() {
     if (isLoggingOut) return;
@@ -216,6 +373,103 @@ export default function Dashboard() {
         ? current.completedTaskIds.filter((id) => id !== taskId)
         : [...current.completedTaskIds, taskId],
     }));
+  }
+
+  async function saveCleaningTask(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const taskToEdit = taskModal;
+    if (!taskToEdit) return;
+
+    const formData = new FormData(event.currentTarget);
+    const label = String(formData.get("taskName") ?? "").trim();
+    const description = String(formData.get("taskDescription") ?? "").trim();
+    if (!label || label.length > 120) {
+      setTaskFormMessage("Enter a task name between 1 and 120 characters.");
+      return;
+    }
+    if (description.length > 500) {
+      setTaskFormMessage("Description must be 500 characters or fewer.");
+      return;
+    }
+
+    setIsSavingTask(true);
+    try {
+      const supabase = createSupabaseBrowserClient();
+      if (taskToEdit === "new") {
+        const { data, error } = await supabase
+          .from("cleaning_tasks")
+          .insert({ task_name: label, description: description || null, is_active: true })
+          .select("id, task_name, description, is_active")
+          .single();
+
+        if (error) throw new Error(`Could not add cleaning task: ${error.message}`);
+        if (!data) throw new Error("Supabase did not return the new cleaning task.");
+
+        const task: CleaningTask = {
+          id: String(data.id),
+          label: data.task_name,
+          description: data.description ?? "",
+          active: data.is_active,
+        };
+        setStore((current) => ({ ...current, tasks: [...current.tasks, task] }));
+        setToast("Cleaning task added.");
+      } else {
+        const { data, error } = await supabase
+          .from("cleaning_tasks")
+          .update({ task_name: label, description: description || null })
+          .eq("id", taskToEdit.id)
+          .select("id, task_name, description, is_active")
+          .maybeSingle();
+
+        if (error) throw new Error(`Could not update cleaning task: ${error.message}`);
+        if (!data) throw new Error("No cleaning task was updated. Check that the task exists and you have permission to update it.");
+
+        setStore((current) => ({
+          ...current,
+          tasks: current.tasks.map((task) =>
+            task.id === taskToEdit.id
+              ? { ...task, label: data.task_name, description: data.description ?? "", active: data.is_active }
+              : task,
+          ),
+        }));
+        setToast("Cleaning task updated.");
+      }
+
+      setTaskModal(null);
+    } catch (error) {
+      setTaskFormMessage(error instanceof Error ? error.message : "Could not save cleaning task.");
+    } finally {
+      setIsSavingTask(false);
+    }
+  }
+
+  async function toggleCleaningTask(task: CleaningTask) {
+    if (updatingTaskId) return;
+
+    const active = !task.active;
+    setUpdatingTaskId(task.id);
+    try {
+      const supabase = createSupabaseBrowserClient();
+      const { data, error } = await supabase
+        .from("cleaning_tasks")
+        .update({ is_active: active })
+        .eq("id", task.id)
+        .select("id")
+        .maybeSingle();
+
+      if (error) throw new Error(`Could not update cleaning task status: ${error.message}`);
+      if (!data) throw new Error("No cleaning task was updated. Check that the task exists and you have permission to update it.");
+
+      setStore((current) => ({
+        ...current,
+        tasks: current.tasks.map((item) => item.id === task.id ? { ...item, active } : item),
+      }));
+      setToast(active ? "Cleaning task activated." : "Cleaning task deactivated.");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Could not update cleaning task status.");
+    } finally {
+      setUpdatingTaskId(null);
+    }
   }
 
   function saveDuty(event: FormEvent<HTMLFormElement>) {
@@ -261,7 +515,7 @@ export default function Dashboard() {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     const name = String(data.get("fullName") ?? "").trim();
-    const email = String(data.get("email") ?? "").trim();
+    const email = String(data.get("email") ?? "").trim().toLowerCase();
     if (!name || !email) return;
     if (staffModal === "new") {
       setIsSavingStaff(true);
@@ -292,24 +546,67 @@ export default function Dashboard() {
       return;
     }
     if (staffModal) {
-      setStore((current) => ({ ...current, staff: current.staff.map((person) => person.id === staffModal.id ? { ...person, name, email } : person) }));
-      setToast("Staff details updated.");
-      setStaffModal(null);
+      setIsSavingStaff(true);
+      try {
+        const supabase = createSupabaseBrowserClient();
+        const { data: updatedProfile, error } = await supabase
+          .from("profiles")
+          .update({ full_name: name, email })
+          .eq("id", staffModal.id)
+          .select("id")
+          .maybeSingle();
+
+        if (error) throw new Error(`Could not update staff details: ${error.message}`);
+        if (!updatedProfile) {
+          throw new Error("No profile was updated. Check that the profile exists and you have permission to update it.");
+        }
+
+        setStore((current) => ({
+          ...current,
+          staff: current.staff.map((person) => person.id === staffModal.id ? { ...person, name, email } : person),
+        }));
+        setToast("Staff details updated.");
+        setStaffModal(null);
+      } catch (error) {
+        setStaffFormMessage(error instanceof Error ? error.message : "Could not update staff details.");
+      } finally {
+        setIsSavingStaff(false);
+      }
     }
   }
 
-  function toggleStaff(person: Staff) {
+  async function toggleStaff(person: Staff) {
+    if (updatingStaffId) return;
+
     const active = !person.active;
-    setStore((current) => ({
-      ...current,
-      staff: current.staff.map((item) => item.id === person.id ? { ...item, active } : item),
-      duties: active ? current.duties : current.duties.flatMap((duty) => {
-        if (duty.date < today) return [duty];
-        const staffIds = duty.staffIds.filter((id) => id !== person.id);
-        return staffIds.length >= 2 ? [{ ...duty, staffIds }] : [];
-      }),
-    }));
-    setToast(active ? `${person.name} reactivated.` : `${person.name} deactivated. Future duties with fewer than two staff were removed.`);
+    setUpdatingStaffId(person.id);
+    try {
+      const supabase = createSupabaseBrowserClient();
+      const { data, error } = await supabase
+        .from("profiles")
+        .update({ is_active: active })
+        .eq("id", person.id)
+        .select("id")
+        .maybeSingle();
+
+      if (error) throw new Error(`Could not update staff status: ${error.message}`);
+      if (!data) throw new Error("No profile was updated. Check that the profile exists and you have permission to update it.");
+
+      setStore((current) => ({
+        ...current,
+        staff: current.staff.map((item) => item.id === person.id ? { ...item, active } : item),
+        duties: active ? current.duties : current.duties.flatMap((duty) => {
+          if (duty.date < today) return [duty];
+          const staffIds = duty.staffIds.filter((id) => id !== person.id);
+          return staffIds.length >= 2 ? [{ ...duty, staffIds }] : [];
+        }),
+      }));
+      setToast(active ? `${person.name} reactivated.` : `${person.name} deactivated. Future duties with fewer than two staff were removed.`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Could not update staff status.");
+    } finally {
+      setUpdatingStaffId(null);
+    }
   }
 
   const selectedDuty = store.duties.find((duty) => duty.date === selectedDate);
@@ -336,10 +633,10 @@ export default function Dashboard() {
           {(["Overview", "Schedule", "Team", "Checklist", "Reminders"] as Section[]).map((item) => {
             const icon = item === "Overview" ? "grid" : item === "Schedule" ? "calendar" : item === "Team" ? "users" : item === "Checklist" ? "check" : "mail";
             return (
-              <button key={item} onClick={() => setSection(item)} className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-[13px] font-medium transition ${section === item ? "bg-white/10 text-[#c5f58a]" : "text-slate-400 hover:bg-white/5 hover:text-white"}`}>
+              <Link key={item} href={SECTION_ROUTES[item]} aria-current={section === item ? "page" : undefined} className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-[13px] font-medium transition ${section === item ? "bg-white/10 text-[#c5f58a]" : "text-slate-400 hover:bg-white/5 hover:text-white"}`}>
                 <Icon name={icon} size={17} />{item}
                 {item === "Reminders" && <span className="ml-auto rounded-full bg-amber-400/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300">Setup</span>}
-              </button>
+              </Link>
             );
           })}
         </nav>
@@ -382,17 +679,17 @@ export default function Dashboard() {
             >
               <Icon name={isLoggingOut ? "clock" : "logout"} size={17} />
             </button>
-            <button onClick={() => setSection("Reminders")} className="relative flex h-9 w-9 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100" aria-label="View reminders"><Icon name="bell" size={18} /><span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-amber-400" /></button>
-            <button onClick={() => { setSection("Schedule"); setDutyModal({ date: selectedDate, staffIds: [] }); }} className="inline-flex items-center gap-2 rounded-xl bg-[#b8f26b] px-3.5 py-2.5 text-xs font-bold text-[#1b2b42] shadow-sm transition hover:bg-[#a8e95a] sm:px-4"><Icon name="plus" size={15} /><span className="hidden sm:inline">New duty</span><span className="sm:hidden">Add</span></button>
+            <Link href={SECTION_ROUTES.Reminders} className="relative flex h-9 w-9 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100" aria-label="View reminders"><Icon name="bell" size={18} /><span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-amber-400" /></Link>
+            <button onClick={() => navigateToSection("Schedule", { date: selectedDate, newDuty: true })} className="inline-flex items-center gap-2 rounded-xl bg-[#b8f26b] px-3.5 py-2.5 text-xs font-bold text-[#1b2b42] shadow-sm transition hover:bg-[#a8e95a] sm:px-4"><Icon name="plus" size={15} /><span className="hidden sm:inline">New duty</span><span className="sm:hidden">Add</span></button>
           </div>
         </header>
 
         <div className="flex min-h-[calc(100vh-72px)]">
           <nav className="fixed bottom-0 left-0 right-0 z-30 flex justify-around border-t border-slate-200 bg-white px-2 py-2 lg:hidden" aria-label="Mobile navigation">
             {(["Overview", "Schedule", "Team", "Checklist", "Reminders"] as Section[]).map((item) => (
-              <button key={item} onClick={() => setSection(item)} aria-label={item} className={`flex flex-col items-center gap-1 px-2 py-1 text-[9px] font-medium ${section === item ? "text-indigo-700" : "text-slate-400"}`}>
+              <Link key={item} href={SECTION_ROUTES[item]} aria-label={item} aria-current={section === item ? "page" : undefined} className={`flex flex-col items-center gap-1 px-2 py-1 text-[9px] font-medium ${section === item ? "text-indigo-700" : "text-slate-400"}`}>
                 <Icon name={item === "Overview" ? "grid" : item === "Schedule" ? "calendar" : item === "Team" ? "users" : item === "Checklist" ? "check" : "mail"} size={18} />{item}
-              </button>
+              </Link>
             ))}
           </nav>
           <main className="mx-auto w-full max-w-[1400px] px-5 pb-24 pt-7 sm:px-8 lg:px-10 lg:pb-10 lg:pt-9">
@@ -404,6 +701,7 @@ export default function Dashboard() {
               </div>
               {section === "Team" && <button onClick={() => setStaffModal("new")} className="inline-flex items-center gap-2 rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d]"><Icon name="plus" size={15} />Add staff member</button>}
               {section === "Schedule" && <button onClick={() => setDutyModal({ date: selectedDate, staffIds: [] })} className="inline-flex items-center gap-2 rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d]"><Icon name="plus" size={15} />Assign a duty</button>}
+              {section === "Checklist" && <button onClick={() => setTaskModal("new")} className="inline-flex items-center gap-2 rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d]"><Icon name="plus" size={15} />Add task</button>}
             </div>
 
             {section === "Overview" && (
@@ -418,7 +716,7 @@ export default function Dashboard() {
                   <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div><h2 className="text-base font-bold text-[#17233c]">Today’s cleaning team</h2><p className="mt-1 text-xs text-slate-500">{formatDate(today, { weekday: "long", month: "long", day: "numeric" })}</p></div>
-                      <button onClick={() => { setSection("Checklist"); setSelectedDate(today); }} className="text-xs font-semibold text-indigo-600 hover:text-indigo-800">Open checklist <span aria-hidden="true">→</span></button>
+                      <button onClick={() => navigateToSection("Checklist", { date: today })} className="text-xs font-semibold text-indigo-600 hover:text-indigo-800">Open checklist <span aria-hidden="true">→</span></button>
                     </div>
                     {todayDuty ? (
                       <>
@@ -432,32 +730,32 @@ export default function Dashboard() {
                           ))}
                         </div>
                         <div className="mt-5 border-t border-slate-100 pt-4">
-                          <div className="mb-3 flex items-center justify-between"><p className="text-xs font-semibold text-slate-700">Today’s task progress</p><p className="text-[11px] font-semibold text-slate-500">{todayDuty.completedTaskIds.length} of {store.tasks.length} complete</p></div>
-                          <ProgressBar value={todayDuty.completedTaskIds.length} total={store.tasks.length} />
+                          <div className="mb-3 flex items-center justify-between"><p className="text-xs font-semibold text-slate-700">Today’s task progress</p><p className="text-[11px] font-semibold text-slate-500">{completedTaskCount(todayDuty)} of {activeTasks.length} complete</p></div>
+                          <ProgressBar value={completedTaskCount(todayDuty)} total={activeTasks.length} />
                         </div>
                       </>
-                    ) : <EmptyState title="No team assigned yet" text="Add at least two staff members to today’s cleaning duty." action="Assign today’s duty" onClick={() => { setSection("Schedule"); setDutyModal({ date: today, staffIds: [] }); }} />}
+                    ) : <EmptyState title="No team assigned yet" text="Add at least two staff members to today’s cleaning duty." action="Assign today’s duty" onClick={() => navigateToSection("Schedule", { date: today, newDuty: true })} />}
                   </div>
                   <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
-                    <div className="flex items-center justify-between"><div><h2 className="text-base font-bold text-[#17233c]">Coming up</h2><p className="mt-1 text-xs text-slate-500">Your next cleaning duties</p></div><button onClick={() => setSection("Schedule")} className="text-xs font-semibold text-indigo-600 hover:text-indigo-800">See schedule</button></div>
+                    <div className="flex items-center justify-between"><div><h2 className="text-base font-bold text-[#17233c]">Coming up</h2><p className="mt-1 text-xs text-slate-500">Your next cleaning duties</p></div><button onClick={() => navigateToSection("Schedule")} className="text-xs font-semibold text-indigo-600 hover:text-indigo-800">See schedule</button></div>
                     <div className="mt-4 space-y-3">
-                      {upcoming.slice(0, 4).map((duty, index) => <UpcomingDuty key={duty.id} duty={duty} staff={store.staff} index={index} onClick={() => { setSelectedDate(duty.date); setSection("Checklist"); }} />)}
+                      {upcoming.slice(0, 4).map((duty, index) => <UpcomingDuty key={duty.id} duty={duty} staff={store.staff} index={index} onClick={() => navigateToSection("Checklist", { date: duty.date })} />)}
                       {!upcoming.length && <p className="py-8 text-center text-xs text-slate-400">No upcoming duties scheduled.</p>}
                     </div>
                   </div>
                 </section>
                 <section className="mt-5 grid gap-5 xl:grid-cols-[1fr_.85fr]">
                   <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
-                    <div className="flex items-center justify-between"><div><h2 className="text-base font-bold text-[#17233c]">Cleaning checklist</h2><p className="mt-1 text-xs text-slate-500">Tasks for today’s duty</p></div><span className="rounded-full bg-indigo-50 px-3 py-1 text-[10px] font-semibold text-indigo-700">{store.tasks.length} tasks</span></div>
-                    {todayDuty ? <div className="mt-4 space-y-1">{store.tasks.slice(0, 4).map((task) => <TaskRow key={task.id} task={task} done={todayDuty.completedTaskIds.includes(task.id)} onToggle={() => toggleTask(todayDuty, task.id)} />)}</div> : <p className="mt-5 text-sm text-slate-400">Assign a team to see their checklist.</p>}
-                    <button onClick={() => setSection("Checklist")} className="mt-4 w-full rounded-xl border border-slate-200 py-2.5 text-xs font-semibold text-slate-600 transition hover:border-indigo-200 hover:text-indigo-700">View all cleaning tasks</button>
+                    <div className="flex items-center justify-between"><div><h2 className="text-base font-bold text-[#17233c]">Cleaning checklist</h2><p className="mt-1 text-xs text-slate-500">Tasks for today’s duty</p></div><span className="rounded-full bg-indigo-50 px-3 py-1 text-[10px] font-semibold text-indigo-700">{activeTasks.length} tasks</span></div>
+                    {todayDuty ? <div className="mt-4 space-y-1">{activeTasks.slice(0, 4).map((task) => <TaskRow key={task.id} task={task} done={todayDuty.completedTaskIds.includes(task.id)} onToggle={() => toggleTask(todayDuty, task.id)} />)}</div> : <p className="mt-5 text-sm text-slate-400">Assign a team to see their checklist.</p>}
+                    <button onClick={() => navigateToSection("Checklist")} className="mt-4 w-full rounded-xl border border-slate-200 py-2.5 text-xs font-semibold text-slate-600 transition hover:border-indigo-200 hover:text-indigo-700">View all cleaning tasks</button>
                   </div>
                   <div className="rounded-2xl border border-[#dfe8ff] bg-[#f1f5ff] p-5 sm:p-6">
                     <div className="flex items-start gap-3">
                       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white text-indigo-600 shadow-sm"><Icon name="mail" size={17} /></span>
                       <div><p className="text-sm font-bold text-[#17233c]">Duty day reminders</p><p className="mt-1 text-xs leading-5 text-slate-600">Email reminders are planned for 8:00 AM on each duty day. Connect an email provider to enable delivery.</p></div>
                     </div>
-                    <button onClick={() => setSection("Reminders")} className="mt-4 text-xs font-bold text-indigo-700 hover:text-indigo-900">Configure reminders <span aria-hidden="true">→</span></button>
+                    <button onClick={() => navigateToSection("Reminders")} className="mt-4 text-xs font-bold text-indigo-700 hover:text-indigo-900">Configure reminders <span aria-hidden="true">→</span></button>
                   </div>
                 </section>
               </>
@@ -474,7 +772,7 @@ export default function Dashboard() {
                   </div>
                   <div className="flex rounded-lg bg-slate-100 p-1">{(["Day", "Week", "Month"] as const).map((mode) => <button key={mode} onClick={() => setCalendarMode(mode)} className={`rounded-md px-3 py-1.5 text-[11px] font-semibold ${calendarMode === mode ? "bg-white text-slate-800 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{mode}</button>)}</div>
                 </div>
-                <CalendarView mode={calendarMode} selectedDate={selectedDate} today={today} duties={store.duties} staff={store.staff} onSelect={(date) => { setSelectedDate(date); if (store.duties.some((duty) => duty.date === date)) setSection("Checklist"); }} onAdd={(date) => setDutyModal({ date, staffIds: [] })} onEdit={(duty) => setDutyModal({ id: duty.id, date: duty.date, staffIds: duty.staffIds })} />
+                <CalendarView mode={calendarMode} selectedDate={selectedDate} today={today} duties={store.duties} staff={store.staff} taskCount={activeTasks.length} onSelect={(date) => { setSelectedDate(date); if (store.duties.some((duty) => duty.date === date)) navigateToSection("Checklist", { date }); }} onAdd={(date) => setDutyModal({ date, staffIds: [] })} onEdit={(duty) => setDutyModal({ id: duty.id, date: duty.date, staffIds: duty.staffIds })} />
               </section>
             )}
 
@@ -493,11 +791,13 @@ export default function Dashboard() {
                         <td className="px-6 py-4"><div className="flex items-center gap-3"><Avatar name={person.name} color={["bg-indigo-100 text-indigo-700", "bg-emerald-100 text-emerald-700", "bg-amber-100 text-amber-700", "bg-rose-100 text-rose-700", "bg-sky-100 text-sky-700"][index % 5]} /><div><p className={`text-xs font-semibold ${person.active ? "text-slate-800" : "text-slate-400"}`}>{person.name}</p><p className="mt-1 text-[11px] text-slate-500">{person.email}</p></div></div></td>
                         <td className="px-4 py-4"><span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold ${person.active ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}><span className={`h-1.5 w-1.5 rounded-full ${person.active ? "bg-emerald-500" : "bg-slate-400"}`} />{person.active ? "Active" : "Inactive"}</span></td>
                         <td className="px-4 py-4 text-xs text-slate-600">{count} {count === 1 ? "duty" : "duties"}</td>
-                        <td className="px-5 py-4"><div className="flex justify-end gap-2"><button onClick={() => setStaffModal(person)} aria-label={`Edit ${person.name}`} className="rounded-lg p-2 text-slate-400 hover:bg-indigo-50 hover:text-indigo-700"><Icon name="edit" size={15} /></button><button onClick={() => toggleStaff(person)} className={`rounded-lg px-2.5 py-2 text-[10px] font-semibold ${person.active ? "text-slate-500 hover:bg-rose-50 hover:text-rose-600" : "text-emerald-700 hover:bg-emerald-50"}`}>{person.active ? "Deactivate" : "Reactivate"}</button></div></td>
+                        <td className="px-5 py-4"><div className="flex justify-end gap-2"><button onClick={() => setStaffModal(person)} aria-label={`Edit ${person.name}`} className="rounded-lg p-2 text-slate-400 hover:bg-indigo-50 hover:text-indigo-700"><Icon name="edit" size={15} /></button><button onClick={() => toggleStaff(person)} disabled={updatingStaffId !== null} className={`rounded-lg px-2.5 py-2 text-[10px] font-semibold disabled:cursor-not-allowed disabled:opacity-60 ${person.active ? "text-slate-500 hover:bg-rose-50 hover:text-rose-600" : "text-emerald-700 hover:bg-emerald-50"}`}>{updatingStaffId === person.id ? "Saving..." : person.active ? "Deactivate" : "Reactivate"}</button></div></td>
                       </tr>;
                     })}</tbody>
                   </table>
-                  {!store.staff.length && <EmptyState title="No staff members yet" text="Add your first team member to get started." action="Add staff member" onClick={() => setStaffModal("new")} />}
+                  {teamLoading && <p role="status" className="p-6 text-center text-xs text-slate-500">Loading team from profiles...</p>}
+                  {!teamLoading && teamError && <p role="alert" className="m-4 rounded-xl border border-rose-100 bg-rose-50 p-4 text-xs text-rose-700">{teamError}</p>}
+                  {!teamLoading && !teamError && !store.staff.length && <EmptyState title="No staff members yet" text="Add your first team member to get started." action="Add staff member" onClick={() => setStaffModal("new")} />}
                 </div>
               </section>
             )}
@@ -511,14 +811,29 @@ export default function Dashboard() {
                   </div>
                   {selectedDuty ? <>
                     <div className="mt-5 rounded-xl bg-[#f7f8fc] p-4"><p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Assigned team</p><div className="mt-3 flex flex-wrap gap-2">{selectedStaff?.map((person) => <span key={person.id} className="inline-flex items-center gap-2 rounded-full bg-white py-1 pl-1 pr-3 text-[11px] font-semibold text-slate-700"><Avatar name={person.name} size="h-6 w-6" />{person.name}</span>)}</div></div>
-                    <div className="mt-5 space-y-2">{store.tasks.map((task) => <TaskRow key={task.id} task={task} done={selectedDuty.completedTaskIds.includes(task.id)} onToggle={() => toggleTask(selectedDuty, task.id)} large />)}</div>
-                    <div className="mt-5 flex items-center justify-between border-t border-slate-100 pt-4"><span className="text-xs font-semibold text-slate-500">{selectedDuty.completedTaskIds.length} of {store.tasks.length} tasks completed</span><span className={`rounded-full px-3 py-1 text-[10px] font-semibold ${selectedDuty.completedTaskIds.length === store.tasks.length ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{selectedDuty.completedTaskIds.length === store.tasks.length ? "Duty complete" : "In progress"}</span></div>
+                    {tasksLoading ? <p role="status" className="mt-5 text-xs text-slate-500">Loading cleaning tasks...</p>
+                      : tasksError ? <p role="alert" className="mt-5 rounded-xl border border-rose-100 bg-rose-50 p-4 text-xs text-rose-700">{tasksError}</p>
+                        : activeTasks.length ? <div className="mt-5 space-y-2">{activeTasks.map((task) => <TaskRow key={task.id} task={task} done={selectedDuty.completedTaskIds.includes(task.id)} onToggle={() => toggleTask(selectedDuty, task.id)} large />)}</div>
+                          : <p className="mt-5 text-sm text-slate-400">There are no active cleaning tasks.</p>}
+                    <div className="mt-5 flex items-center justify-between border-t border-slate-100 pt-4"><span className="text-xs font-semibold text-slate-500">{completedTaskCount(selectedDuty)} of {activeTasks.length} tasks completed</span><span className={`rounded-full px-3 py-1 text-[10px] font-semibold ${activeTasks.length > 0 && completedTaskCount(selectedDuty) === activeTasks.length ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{activeTasks.length > 0 && completedTaskCount(selectedDuty) === activeTasks.length ? "Duty complete" : "In progress"}</span></div>
                   </> : <EmptyState title="No cleaning duty for this date" text="Choose another date or assign a team to get started." action="Assign a duty" onClick={() => setDutyModal({ date: selectedDate, staffIds: [] })} />}
                 </section>
                 <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
-                  <h2 className="text-base font-bold text-[#17233c]">Checklist guide</h2><p className="mt-1 text-xs leading-5 text-slate-500">A few shared tasks keep the office ready for everyone.</p>
-                  <div className="mt-5 space-y-3">{store.tasks.map((task, index) => <div key={task.id} className="flex gap-3"><span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-[10px] font-bold text-indigo-700">{String(index + 1).padStart(2, "0")}</span><p className="pt-1 text-xs leading-5 text-slate-600">{task.label}</p></div>)}</div>
-                  <div className="mt-6 rounded-xl bg-[#f0f9e7] p-4"><p className="text-xs font-bold text-[#345322]">Teamwork makes it easier</p><p className="mt-1 text-[11px] leading-5 text-[#57734a]">Work through the checklist together and tick off each task when it’s done.</p></div>
+                  <h2 className="text-base font-bold text-[#17233c]">Manage cleaning tasks</h2><p className="mt-1 text-xs leading-5 text-slate-500">Add, edit, or deactivate checklist tasks.</p>
+                  {tasksLoading && <p role="status" className="mt-5 text-xs text-slate-500">Loading cleaning tasks...</p>}
+                  {!tasksLoading && tasksError && <p role="alert" className="mt-5 rounded-xl border border-rose-100 bg-rose-50 p-4 text-xs text-rose-700">{tasksError}</p>}
+                  {!tasksLoading && !tasksError && !store.tasks.length && <p className="mt-5 text-xs text-slate-500">No cleaning tasks yet. Add the first task to get started.</p>}
+                  {!tasksLoading && !tasksError && <div className="mt-5 space-y-2">{store.tasks.map((task) => (
+                    <div key={task.id} className="flex items-center gap-2 rounded-xl border border-slate-100 p-3">
+                      <div className="min-w-0 flex-1">
+                        <p className={`truncate text-xs font-semibold ${task.active ? "text-slate-800" : "text-slate-400"}`}>{task.label}</p>
+                        {task.description && <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-slate-500">{task.description}</p>}
+                        <p className={`mt-1 text-[10px] ${task.active ? "text-emerald-700" : "text-slate-400"}`}>{task.active ? "Active" : "Inactive"}</p>
+                      </div>
+                      <button type="button" onClick={() => setTaskModal(task)} disabled={updatingTaskId !== null} aria-label={`Edit ${task.label}`} className="rounded-lg p-2 text-slate-400 hover:bg-indigo-50 hover:text-indigo-700 disabled:opacity-50"><Icon name="edit" size={14} /></button>
+                      <button type="button" onClick={() => toggleCleaningTask(task)} disabled={updatingTaskId !== null} className={`rounded-lg px-2.5 py-2 text-[10px] font-semibold disabled:cursor-not-allowed disabled:opacity-60 ${task.active ? "text-slate-500 hover:bg-rose-50 hover:text-rose-600" : "text-emerald-700 hover:bg-emerald-50"}`}>{updatingTaskId === task.id ? "Saving..." : task.active ? "Deactivate" : "Activate"}</button>
+                    </div>
+                  ))}</div>}
                 </section>
               </div>
             )}
@@ -531,14 +846,14 @@ export default function Dashboard() {
                   <div className="mt-5 divide-y divide-slate-100 rounded-xl border border-slate-100">
                     <div className="flex items-center justify-between px-4 py-3.5"><div><p className="text-xs font-semibold text-slate-700">Send time</p><p className="mt-1 text-[10px] text-slate-500">On each assigned duty day</p></div><span className="inline-flex items-center gap-2 text-xs font-semibold text-slate-700"><Icon name="clock" size={14} />8:00 AM</span></div>
                     <div className="flex items-center justify-between px-4 py-3.5"><div><p className="text-xs font-semibold text-slate-700">Duplicate protection</p><p className="mt-1 text-[10px] text-slate-500">One reminder per person, per duty date</p></div><span className="rounded-full bg-slate-100 px-2.5 py-1 text-[9px] font-semibold text-slate-600">Planned</span></div>
-                    <div className="flex items-center justify-between px-4 py-3.5"><div><p className="text-xs font-semibold text-slate-700">Reminder includes</p><p className="mt-1 text-[10px] text-slate-500">Duty date, assigned team, and cleaning tasks</p></div><span className="text-[10px] font-semibold text-slate-500">{store.tasks.length} tasks</span></div>
+                    <div className="flex items-center justify-between px-4 py-3.5"><div><p className="text-xs font-semibold text-slate-700">Reminder includes</p><p className="mt-1 text-[10px] text-slate-500">Duty date, assigned team, and cleaning tasks</p></div><span className="text-[10px] font-semibold text-slate-500">{activeTasks.length} tasks</span></div>
                   </div>
                 </section>
                 <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
                   <h2 className="text-base font-bold text-[#17233c]">Reminder preview</h2><p className="mt-1 text-xs text-slate-500">A preview of the email assigned staff will receive.</p>
                   {todayDuty ? <div className="mt-5 overflow-hidden rounded-xl border border-slate-200">
                     <div className="flex items-center gap-2 bg-[#172543] px-4 py-3"><span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#b8f26b] text-[9px] font-black text-[#172543]">DT</span><span className="text-xs font-semibold text-white">Your cleaning duty is today</span></div>
-                    <div className="p-4"><p className="text-[10px] text-slate-400">To: {todayDuty.staffIds.map((id) => store.staff.find((person) => person.id === id)?.email).filter(Boolean).join(", ")}</p><p className="mt-4 text-xs font-bold text-slate-800">Hi team,</p><p className="mt-2 text-xs leading-5 text-slate-600">You’re scheduled for the office cleaning duty today, {formatDate(today, { weekday: "long", month: "long", day: "numeric" })}.</p><p className="mt-4 text-[10px] font-bold uppercase tracking-wider text-slate-500">Today’s cleaning tasks</p><ul className="mt-2 space-y-2">{store.tasks.map((task) => <li key={task.id} className="flex items-center gap-2 text-[11px] text-slate-600"><span className="h-1.5 w-1.5 rounded-full bg-indigo-400" />{task.label}</li>)}</ul><p className="mt-4 text-xs text-slate-600">Thanks for keeping our office fresh!</p></div>
+                    <div className="p-4"><p className="text-[10px] text-slate-400">To: {todayDuty.staffIds.map((id) => store.staff.find((person) => person.id === id)?.email).filter(Boolean).join(", ")}</p><p className="mt-4 text-xs font-bold text-slate-800">Hi team,</p><p className="mt-2 text-xs leading-5 text-slate-600">You’re scheduled for the office cleaning duty today, {formatDate(today, { weekday: "long", month: "long", day: "numeric" })}.</p><p className="mt-4 text-[10px] font-bold uppercase tracking-wider text-slate-500">Today’s cleaning tasks</p><ul className="mt-2 space-y-2">{activeTasks.map((task) => <li key={task.id} className="flex items-center gap-2 text-[11px] text-slate-600"><span className="h-1.5 w-1.5 rounded-full bg-indigo-400" />{task.label}</li>)}</ul><p className="mt-4 text-xs text-slate-600">Thanks for keeping our office fresh!</p></div>
                   </div> : <p className="mt-5 rounded-xl bg-slate-50 p-4 text-xs text-slate-500">Assign a team to today’s duty to preview a reminder.</p>}
                 </section>
               </div>
@@ -568,7 +883,24 @@ export default function Dashboard() {
             <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Confirm password</span><input name="confirmPassword" required type="password" minLength={8} autoComplete="new-password" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
           </>}
           {staffFormMessage && <p role="alert" className="rounded-xl border border-rose-100 bg-rose-50 px-3.5 py-3 text-xs text-rose-700">{staffFormMessage}</p>}
-          <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" disabled={isSavingStaff} onClick={() => setStaffModal(null)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60">Cancel</button><button type="submit" disabled={isSavingStaff} className="rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d] disabled:cursor-not-allowed disabled:opacity-60">{isSavingStaff ? "Creating account..." : staffModal === "new" ? "Create staff account" : "Save changes"}</button></div>
+          <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" disabled={isSavingStaff} onClick={() => setStaffModal(null)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60">Cancel</button><button type="submit" disabled={isSavingStaff} className="rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d] disabled:cursor-not-allowed disabled:opacity-60">{isSavingStaff ? staffModal === "new" ? "Creating account..." : "Saving changes..." : staffModal === "new" ? "Create staff account" : "Save changes"}</button></div>
+        </form>
+      </Modal>}
+      {taskModal && <Modal title={taskModal === "new" ? "Add cleaning task" : "Edit cleaning task"} onClose={() => { if (!isSavingTask) setTaskModal(null); }}>
+        <form key={taskModal === "new" ? "new-task" : taskModal.id} onSubmit={saveCleaningTask} className="space-y-4">
+          <label className="block">
+            <span className="mb-2 block text-xs font-semibold text-slate-700">Task name</span>
+            <input name="taskName" required maxLength={120} autoFocus defaultValue={taskModal === "new" ? "" : taskModal.label} placeholder="e.g. Wipe tables and shared surfaces" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" />
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-xs font-semibold text-slate-700">Description <span className="font-normal text-slate-400">(optional)</span></span>
+            <textarea name="taskDescription" maxLength={500} rows={3} defaultValue={taskModal === "new" ? "" : taskModal.description} placeholder="Add any useful instructions for this task." className="w-full resize-y rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" />
+          </label>
+          {taskFormMessage && <p role="alert" className="rounded-xl border border-rose-100 bg-rose-50 px-3.5 py-3 text-xs text-rose-700">{taskFormMessage}</p>}
+          <div className="flex justify-end gap-2 border-t border-slate-100 pt-4">
+            <button type="button" disabled={isSavingTask} onClick={() => setTaskModal(null)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60">Cancel</button>
+            <button type="submit" disabled={isSavingTask} className="rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d] disabled:cursor-not-allowed disabled:opacity-60">{isSavingTask ? "Saving task..." : taskModal === "new" ? "Add task" : "Save changes"}</button>
+          </div>
         </form>
       </Modal>}
       {toast && <div role="status" className="fixed bottom-20 left-1/2 z-50 -translate-x-1/2 rounded-xl bg-[#172543] px-4 py-3 text-xs font-semibold text-white shadow-xl lg:bottom-6">{toast}</div>}
@@ -593,14 +925,14 @@ function UpcomingDuty({ duty, staff, index, onClick }: { duty: Duty; staff: Staf
 }
 
 function TaskRow({ task, done, onToggle, large = false }: { task: CleaningTask; done: boolean; onToggle: () => void; large?: boolean }) {
-  return <label className={`flex cursor-pointer items-center gap-3 rounded-xl transition ${large ? "border border-slate-100 px-4 py-3.5 hover:bg-slate-50" : "px-2 py-2.5 hover:bg-slate-50"}`}><input type="checkbox" checked={done} onChange={onToggle} className="h-4 w-4 shrink-0 rounded border-slate-300 accent-indigo-600" /><span className={`flex-1 text-xs ${done ? "text-slate-400 line-through" : "font-medium text-slate-700"}`}>{task.label}</span>{done && <span className="text-[9px] font-semibold text-emerald-600">Done</span>}</label>;
+  return <label className={`flex cursor-pointer items-start gap-3 rounded-xl transition ${large ? "border border-slate-100 px-4 py-3.5 hover:bg-slate-50" : "px-2 py-2.5 hover:bg-slate-50"}`}><input type="checkbox" checked={done} onChange={onToggle} className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 accent-indigo-600" /><span className="min-w-0 flex-1"><span className={`block text-xs ${done ? "text-slate-400 line-through" : "font-medium text-slate-700"}`}>{task.label}</span>{task.description && <span className="mt-1 block text-[10px] leading-4 text-slate-500">{task.description}</span>}</span>{done && <span className="text-[9px] font-semibold text-emerald-600">Done</span>}</label>;
 }
 
 function EmptyState({ title, text, action, onClick }: { title: string; text: string; action: string; onClick: () => void }) {
   return <div className="py-10 text-center"><span className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-slate-100 text-slate-400"><Icon name="calendar" size={18} /></span><p className="mt-3 text-sm font-semibold text-slate-700">{title}</p><p className="mt-1 text-xs text-slate-500">{text}</p><button onClick={onClick} className="mt-4 rounded-lg bg-[#172543] px-3.5 py-2 text-[11px] font-semibold text-white hover:bg-[#24375d]">{action}</button></div>;
 }
 
-function CalendarView({ mode, selectedDate, today, duties, staff, onSelect, onAdd, onEdit }: { mode: "Day" | "Week" | "Month"; selectedDate: string; today: string; duties: Duty[]; staff: Staff[]; onSelect: (date: string) => void; onAdd: (date: string) => void; onEdit: (duty: Duty) => void }) {
+function CalendarView({ mode, selectedDate, today, duties, staff, taskCount, onSelect, onAdd, onEdit }: { mode: "Day" | "Week" | "Month"; selectedDate: string; today: string; duties: Duty[]; staff: Staff[]; taskCount: number; onSelect: (date: string) => void; onAdd: (date: string) => void; onEdit: (duty: Duty) => void }) {
   const selected = new Date(`${selectedDate}T12:00:00`);
   const start = new Date(selected);
   if (mode === "Week") start.setDate(selected.getDate() - selected.getDay() + 1);
@@ -625,7 +957,7 @@ function CalendarView({ mode, selectedDate, today, duties, staff, onSelect, onAd
       const assigned = duty?.staffIds.map((id) => staff.find((person) => person.id === id)).filter((person): person is Staff => Boolean(person)) ?? [];
       return <div key={date} className={`${mode === "Month" ? "min-h-[112px] border-b border-r border-slate-100 p-2" : "min-h-[190px] rounded-xl border border-slate-100 p-3"} ${isOutside ? "bg-slate-50/70" : "bg-white"} ${date === selectedDate ? "ring-2 ring-inset ring-indigo-300" : ""} ${mode === "Week" ? "hover:border-indigo-200 hover:bg-indigo-50/30" : ""}`}>
         <div className="flex items-center justify-between"><button onClick={(event) => { event.stopPropagation(); onSelect(date); }} className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold ${date === today ? "bg-[#172543] text-white" : isOutside ? "text-slate-300" : "text-slate-600"}`}>{new Date(`${date}T12:00:00`).getDate()}</button>{mode === "Week" && <button onClick={(event) => { event.stopPropagation(); onAdd(date); }} aria-label={`Add duty on ${date}`} className="flex h-6 w-6 items-center justify-center rounded-md text-slate-300 hover:bg-indigo-100 hover:text-indigo-700"><Icon name="plus" size={14} /></button>}</div>
-        {duty ? <button onClick={(event) => { event.stopPropagation(); onEdit(duty); }} className={`mt-2 w-full rounded-lg bg-[#eff5e7] p-2 text-left hover:bg-[#e6f1d8] ${mode === "Month" ? "p-1.5" : ""}`}><span className="block text-[9px] font-bold text-[#527337]">Cleaning crew</span><span className="mt-1 block truncate text-[10px] font-semibold text-slate-700">{assigned.map((person) => person.name.split(" ")[0]).join(", ")}</span>{mode === "Week" && <span className="mt-1 block text-[9px] text-slate-500">{duty.completedTaskIds.length}/{DEFAULT_TASKS.length} tasks done</span>}</button> : mode === "Week" && <button onClick={(event) => { event.stopPropagation(); onAdd(date); }} className="mt-3 text-[10px] text-slate-300 hover:text-indigo-600">+ Add duty</button>}
+        {duty ? <button onClick={(event) => { event.stopPropagation(); onEdit(duty); }} className={`mt-2 w-full rounded-lg bg-[#eff5e7] p-2 text-left hover:bg-[#e6f1d8] ${mode === "Month" ? "p-1.5" : ""}`}><span className="block text-[9px] font-bold text-[#527337]">Cleaning crew</span><span className="mt-1 block truncate text-[10px] font-semibold text-slate-700">{assigned.map((person) => person.name.split(" ")[0]).join(", ")}</span>{mode === "Week" && <span className="mt-1 block text-[9px] text-slate-500">{duty.completedTaskIds.length}/{taskCount} tasks done</span>}</button> : mode === "Week" && <button onClick={(event) => { event.stopPropagation(); onAdd(date); }} className="mt-3 text-[10px] text-slate-300 hover:text-indigo-600">+ Add duty</button>}
       </div>;
     })}
   </div>;
