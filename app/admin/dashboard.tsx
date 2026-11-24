@@ -4,15 +4,58 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { getOneYearLater } from "@/lib/duty-schedule";
+import type { CleaningTask, Duty, Staff, Store } from "@/lib/types";
+import {
+  deleteDuty as deleteDutyFromDatabase,
+  getDashboardData,
+  saveCleaningTask as saveCleaningTaskToDatabase,
+  saveDuty as saveDutyToDatabase,
+  saveReminderTime as saveReminderTimeToDatabase,
+  toggleCleaningTask as toggleCleaningTaskInDatabase,
+  toggleDutyTask as toggleDutyTaskInDatabase,
+  toggleStaffStatus,
+  updateStaffDetails,
+} from "./actions";
+import { signOut } from "../login/actions";
 import { registerUser } from "./user/actions";
+import { useAdminUser } from "./admin-user-provider";
 
-type Staff = { id: string; name: string; email: string; staffId?: string; active: boolean };
-type CleaningTask = { id: string; label: string; description: string; active: boolean };
-type Duty = { id: string; date: string; staffIds: string[]; completedTaskIds: string[] };
-type Store = { staff: Staff[]; duties: Duty[]; tasks: CleaningTask[] };
 type Section = "Overview" | "Schedule" | "Team" | "Checklist" | "Reminders";
-type DutyDraft = { id?: string; date: string; staffIds: string[] };
+type DutyDraft = {
+  id?: string;
+  startDate: string;
+  endDate: string;
+  repeatWeekly: boolean;
+  repeatDays: number[];
+  staffIds: string[];
+  taskIds: string[];
+};
+
+const WEEK_DAYS = [
+  { value: 1, label: "Mon" },
+  { value: 2, label: "Tue" },
+  { value: 3, label: "Wed" },
+  { value: 4, label: "Thu" },
+  { value: 5, label: "Fri" },
+  { value: 6, label: "Sat" },
+  { value: 0, label: "Sun" },
+];
+
+function sectionLabel(section: Section) {
+  return section === "Checklist" ? "Task" : section;
+}
+
+function createDutyDraft(date: string): DutyDraft {
+  return {
+    startDate: date,
+    endDate: date,
+    repeatWeekly: false,
+    repeatDays: [],
+    staffIds: [],
+    taskIds: [],
+  };
+}
 
 const SECTION_ROUTES: Record<Section, string> = {
   Overview: "/admin",
@@ -21,15 +64,6 @@ const SECTION_ROUTES: Record<Section, string> = {
   Checklist: "/admin/checklist",
   Reminders: "/admin/reminders",
 };
-
-const STORAGE_KEY = "duty-track-workspace-v1";
-const DEFAULT_TASKS: CleaningTask[] = [
-  { id: "sweep", label: "Sweep and mop the floor", description: "", active: true },
-  { id: "tables", label: "Wipe tables and shared surfaces", description: "", active: true },
-  { id: "rubbish", label: "Empty bins and replace liners", description: "", active: true },
-  { id: "kitchen", label: "Tidy the kitchen and wash dishes", description: "", active: true },
-  { id: "supplies", label: "Restock cleaning supplies", description: "", active: true },
-];
 
 function dateKey(date: Date) {
   const year = date.getFullYear();
@@ -51,41 +85,6 @@ function shiftMonth(date: Date, months: number) {
   return next;
 }
 
-function createSeed(today: string): Store {
-  const staff: Staff[] = [
-    { id: "staff-maya", name: "Maya Chen", email: "maya.chen@northstar.co", active: true },
-    { id: "staff-james", name: "James Wilson", email: "james.wilson@northstar.co", active: true },
-    { id: "staff-amara", name: "Amara Okafor", email: "amara.okafor@northstar.co", active: true },
-    { id: "staff-noah", name: "Noah Patel", email: "noah.patel@northstar.co", active: true },
-    { id: "staff-elena", name: "Elena Rossi", email: "elena.rossi@northstar.co", active: true },
-  ];
-  const todayDate = new Date(`${today}T12:00:00`);
-  return {
-    staff,
-    tasks: DEFAULT_TASKS,
-    duties: [
-      {
-        id: "duty-today",
-        date: today,
-        staffIds: ["staff-maya", "staff-james"],
-        completedTaskIds: ["sweep"],
-      },
-      {
-        id: "duty-tomorrow",
-        date: dateKey(shiftDate(todayDate, 1)),
-        staffIds: ["staff-amara", "staff-noah"],
-        completedTaskIds: [],
-      },
-      {
-        id: "duty-friday",
-        date: dateKey(shiftDate(todayDate, 3)),
-        staffIds: ["staff-elena", "staff-maya"],
-        completedTaskIds: [],
-      },
-    ],
-  };
-}
-
 function initials(name: string) {
   return name
     .split(" ")
@@ -97,6 +96,15 @@ function initials(name: string) {
 
 function formatDate(value: string, options: Intl.DateTimeFormatOptions = { month: "short", day: "numeric" }) {
   return new Date(`${value}T12:00:00`).toLocaleDateString("en-US", options);
+}
+
+function formatTime(value: string) {
+  const [hours, minutes] = value.split(":").map(Number);
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(Date.UTC(2000, 0, 1, hours, minutes)));
 }
 
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
@@ -133,7 +141,8 @@ function Avatar({ name, color = "bg-indigo-100 text-indigo-700", size = "h-9 w-9
 
 export default function Dashboard({ section }: { section: Section }) {
   const router = useRouter();
-  const [store, setStore] = useState<Store>(() => createSeed("2026-11-18"));
+  const adminUser = useAdminUser();
+  const [store, setStore] = useState<Store>({ staff: [], duties: [], tasks: [], reminderTime: "08:00" });
   const [ready, setReady] = useState(false);
   const [today, setToday] = useState("2026-11-18");
   const [selectedDate, setSelectedDate] = useState("2026-11-18");
@@ -142,6 +151,7 @@ export default function Dashboard({ section }: { section: Section }) {
   const [staffModal, setStaffModal] = useState<Staff | "new" | null>(null);
   const [taskModal, setTaskModal] = useState<CleaningTask | "new" | null>(null);
   const [staffSearch, setStaffSearch] = useState("");
+  const [reminderTimeDraft, setReminderTimeDraft] = useState("08:00");
   const [staffFormMessage, setStaffFormMessage] = useState("");
   const [taskFormMessage, setTaskFormMessage] = useState("");
   const [teamLoading, setTeamLoading] = useState(true);
@@ -151,6 +161,7 @@ export default function Dashboard({ section }: { section: Section }) {
   const [isSavingStaff, setIsSavingStaff] = useState(false);
   const [updatingStaffId, setUpdatingStaffId] = useState<string | null>(null);
   const [isSavingTask, setIsSavingTask] = useState(false);
+  const [isSavingReminderTime, setIsSavingReminderTime] = useState(false);
   const [updatingTaskId, setUpdatingTaskId] = useState<string | null>(null);
   const [toast, setToast] = useState("");
   const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -160,72 +171,23 @@ export default function Dashboard({ section }: { section: Section }) {
     const frame = window.requestAnimationFrame(() => {
       void (async () => {
         const currentDate = dateKey(new Date());
-        const saved = window.localStorage.getItem(STORAGE_KEY);
-        let loadedStore: Store | null = null;
-        if (saved) {
-          try {
-            const parsed = JSON.parse(saved) as Store;
-            if (Array.isArray(parsed.staff) && Array.isArray(parsed.duties) && Array.isArray(parsed.tasks)) loadedStore = parsed;
-          } catch {
-            window.localStorage.removeItem(STORAGE_KEY);
-          }
-        }
-        if (!active) return;
-
-        setStore(loadedStore ?? createSeed(currentDate));
         setToday(currentDate);
         setSelectedDate(currentDate);
-        setReady(true);
-
         try {
-          const supabase = createSupabaseBrowserClient();
-          const { data: staffRoleRows, error: roleError } = await supabase
-            .from("roles")
-            .select("id")
-            .ilike("role_name", "staff");
-
-          if (roleError) throw new Error(`Could not load the staff role: ${roleError.message}`);
-
-          const staffRoleIds = (staffRoleRows ?? []).map((role) => role.id);
-          if (staffRoleIds.length === 0) {
-            if (active) setStore((current) => ({ ...current, staff: [] }));
-            return;
-          }
-
-          const { data: profiles, error: profilesError } = await supabase
-            .from("profiles")
-            .select("id, staff_id, full_name, email, is_active")
-            .in("role_id", staffRoleIds)
-            .order("full_name", { ascending: true });
-
-          if (profilesError) throw new Error(`Could not load team profiles: ${profilesError.message}`);
-          if (!profiles) throw new Error("Supabase returned no team profile data.");
-
-          const invalidProfile = profiles.some(
-            (profile) =>
-              typeof profile.id !== "string" ||
-              typeof profile.full_name !== "string" ||
-              typeof profile.email !== "string" ||
-              typeof profile.is_active !== "boolean",
-          );
-          if (invalidProfile) throw new Error("A staff profile is missing its ID, name, email, or active status.");
-
-          const staff: Staff[] = profiles.map((profile) => ({
-            id: profile.id,
-            name: profile.full_name,
-            email: profile.email,
-            staffId: typeof profile.staff_id === "string" ? profile.staff_id : undefined,
-            active: profile.is_active,
-          }));
-
-          if (active) setStore((current) => ({ ...current, staff }));
+          const loadedStore = await getDashboardData();
+          if (active) setStore(loadedStore);
         } catch (error) {
           if (active) {
-            setTeamError(error instanceof Error ? error.message : "Could not load team profiles.");
-            setStore((current) => ({ ...current, staff: [] }));
+            const message = error instanceof Error ? error.message : "Could not load workspace data.";
+            setTeamError(message);
+            setTasksError(message);
           }
         } finally {
-          if (active) setTeamLoading(false);
+          if (active) {
+            setTeamLoading(false);
+            setTasksLoading(false);
+            setReady(true);
+          }
         }
       })();
     });
@@ -243,66 +205,12 @@ export default function Dashboard({ section }: { section: Section }) {
 
     if (validDate) setSelectedDate(validDate);
     if (section === "Schedule" && params.get("newDuty") === "1") {
-      setDutyModal({ date: validDate ?? dateKey(new Date()), staffIds: [] });
+      setDutyModal(createDutyDraft(validDate ?? dateKey(new Date())));
     }
     if (params.has("date") || params.has("newDuty")) {
       window.history.replaceState(null, "", SECTION_ROUTES[section]);
     }
   }, [ready, section]);
-
-  useEffect(() => {
-    if (ready) window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
-  }, [ready, store]);
-
-  useEffect(() => {
-    if (!ready) return;
-    let active = true;
-
-    void (async () => {
-      try {
-        const supabase = createSupabaseBrowserClient();
-        const { data, error } = await supabase
-          .from("cleaning_tasks")
-          .select("id, task_name, description, is_active")
-          .order("task_name", { ascending: true });
-
-        if (error) throw new Error(`Could not load cleaning tasks: ${error.message}`);
-        if (!data) throw new Error("Supabase returned no cleaning task data.");
-
-        const invalidTask = data.some(
-          (task) =>
-            (typeof task.id !== "string" && typeof task.id !== "number") ||
-            typeof task.task_name !== "string" ||
-            (typeof task.description !== "string" && task.description !== null) ||
-            typeof task.is_active !== "boolean",
-        );
-        if (invalidTask) throw new Error("A cleaning task has invalid ID, name, description, or active status data.");
-
-        if (active) {
-          setStore((current) => ({
-            ...current,
-            tasks: data.map((task) => ({
-              id: String(task.id),
-              label: task.task_name,
-              description: task.description ?? "",
-              active: task.is_active,
-            })),
-          }));
-        }
-      } catch (error) {
-        if (active) {
-          setTasksError(error instanceof Error ? error.message : "Could not load cleaning tasks.");
-          setStore((current) => ({ ...current, tasks: [] }));
-        }
-      } finally {
-        if (active) setTasksLoading(false);
-      }
-    })();
-
-    return () => {
-      active = false;
-    };
-  }, [ready]);
 
   useEffect(() => {
     if (!toast) return;
@@ -318,18 +226,39 @@ export default function Dashboard({ section }: { section: Section }) {
     setTaskFormMessage("");
   }, [taskModal]);
 
+  useEffect(() => {
+    setReminderTimeDraft(store.reminderTime);
+  }, [store.reminderTime]);
+
+  useEffect(() => {
+    if (section !== "Team") setStaffSearch("");
+  }, [section]);
+
   const todayDuty = store.duties.find((duty) => duty.date === today);
   const activeStaff = store.staff.filter((person) => person.active);
+  const filteredStaff = useMemo(
+    () => store.staff.filter((person) =>
+      `${person.name} ${person.email}`.toLowerCase().includes(staffSearch.toLowerCase()),
+    ),
+    [staffSearch, store.staff],
+  );
+  const activeStaffCount = activeStaff.length;
   const activeTasks = store.tasks.filter((task) => task.active);
+  const tasksForDuty = (duty: Duty | undefined) =>
+    duty ? activeTasks.filter((task) => duty.taskIds.includes(task.id)) : [];
+  const todayTasks = tasksForDuty(todayDuty);
   const upcoming = useMemo(
     () => store.duties.filter((duty) => duty.date >= today).sort((a, b) => a.date.localeCompare(b.date)),
     [store.duties, today],
   );
-  const completedDutyCount = store.duties.filter((duty) => activeTasks.length > 0 && activeTasks.every((task) => duty.completedTaskIds.includes(task.id))).length;
+  const completedDutyCount = store.duties.filter((duty) => {
+    const dutyTasks = tasksForDuty(duty);
+    return dutyTasks.length > 0 && dutyTasks.every((task) => duty.completedTaskIds.includes(task.id));
+  }).length;
   const pendingDutyCount = store.duties.length - completedDutyCount;
 
   function completedTaskCount(duty: Duty) {
-    return activeTasks.filter((task) => duty.completedTaskIds.includes(task.id)).length;
+    return tasksForDuty(duty).filter((task) => duty.completedTaskIds.includes(task.id)).length;
   }
 
   function navigateToSection(nextSection: Section, options?: { date?: string; newDuty?: boolean }) {
@@ -345,17 +274,7 @@ export default function Dashboard({ section }: { section: Section }) {
 
     setIsLoggingOut(true);
     try {
-      const supabase = createSupabaseBrowserClient();
-      const { error } = await supabase.auth.signOut();
-      if (error) {
-        setToast(error.message);
-        setIsLoggingOut(false);
-        return;
-      }
-
-      setIsLoggingOut(false);
-      router.replace("/login");
-      router.refresh();
+      await signOut();
     } catch (error) {
       setToast(error instanceof Error ? error.message : "Unable to log out.");
       setIsLoggingOut(false);
@@ -366,13 +285,18 @@ export default function Dashboard({ section }: { section: Section }) {
     setStore((current) => ({ ...current, duties: current.duties.map((duty) => duty.id === id ? update(duty) : duty) }));
   }
 
-  function toggleTask(duty: Duty, taskId: string) {
-    updateDuty(duty.id, (current) => ({
-      ...current,
-      completedTaskIds: current.completedTaskIds.includes(taskId)
-        ? current.completedTaskIds.filter((id) => id !== taskId)
-        : [...current.completedTaskIds, taskId],
-    }));
+  async function toggleTask(duty: Duty, taskId: string) {
+    try {
+      await toggleDutyTaskInDatabase(duty.id, taskId);
+      updateDuty(duty.id, (current) => ({
+        ...current,
+        completedTaskIds: current.completedTaskIds.includes(taskId)
+          ? current.completedTaskIds.filter((id) => id !== taskId)
+          : [...current.completedTaskIds, taskId],
+      }));
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Could not update task progress.");
+    }
   }
 
   async function saveCleaningTask(event: FormEvent<HTMLFormElement>) {
@@ -394,46 +318,18 @@ export default function Dashboard({ section }: { section: Section }) {
 
     setIsSavingTask(true);
     try {
-      const supabase = createSupabaseBrowserClient();
-      if (taskToEdit === "new") {
-        const { data, error } = await supabase
-          .from("cleaning_tasks")
-          .insert({ task_name: label, description: description || null, is_active: true })
-          .select("id, task_name, description, is_active")
-          .single();
-
-        if (error) throw new Error(`Could not add cleaning task: ${error.message}`);
-        if (!data) throw new Error("Supabase did not return the new cleaning task.");
-
-        const task: CleaningTask = {
-          id: String(data.id),
-          label: data.task_name,
-          description: data.description ?? "",
-          active: data.is_active,
-        };
-        setStore((current) => ({ ...current, tasks: [...current.tasks, task] }));
-        setToast("Cleaning task added.");
-      } else {
-        const { data, error } = await supabase
-          .from("cleaning_tasks")
-          .update({ task_name: label, description: description || null })
-          .eq("id", taskToEdit.id)
-          .select("id, task_name, description, is_active")
-          .maybeSingle();
-
-        if (error) throw new Error(`Could not update cleaning task: ${error.message}`);
-        if (!data) throw new Error("No cleaning task was updated. Check that the task exists and you have permission to update it.");
-
-        setStore((current) => ({
-          ...current,
-          tasks: current.tasks.map((task) =>
-            task.id === taskToEdit.id
-              ? { ...task, label: data.task_name, description: data.description ?? "", active: data.is_active }
-              : task,
-          ),
-        }));
-        setToast("Cleaning task updated.");
-      }
+      const task = await saveCleaningTaskToDatabase({
+        id: taskToEdit === "new" ? undefined : taskToEdit.id,
+        label,
+        description,
+      });
+      setStore((current) => ({
+        ...current,
+        tasks: taskToEdit === "new"
+          ? [...current.tasks, task]
+          : current.tasks.map((item) => item.id === task.id ? task : item),
+      }));
+      setToast(taskToEdit === "new" ? "Cleaning task added." : "Cleaning task updated.");
 
       setTaskModal(null);
     } catch (error) {
@@ -446,25 +342,15 @@ export default function Dashboard({ section }: { section: Section }) {
   async function toggleCleaningTask(task: CleaningTask) {
     if (updatingTaskId) return;
 
-    const active = !task.active;
     setUpdatingTaskId(task.id);
     try {
-      const supabase = createSupabaseBrowserClient();
-      const { data, error } = await supabase
-        .from("cleaning_tasks")
-        .update({ is_active: active })
-        .eq("id", task.id)
-        .select("id")
-        .maybeSingle();
-
-      if (error) throw new Error(`Could not update cleaning task status: ${error.message}`);
-      if (!data) throw new Error("No cleaning task was updated. Check that the task exists and you have permission to update it.");
+      const updatedActive = await toggleCleaningTaskInDatabase(task.id);
 
       setStore((current) => ({
         ...current,
-        tasks: current.tasks.map((item) => item.id === task.id ? { ...item, active } : item),
+        tasks: current.tasks.map((item) => item.id === task.id ? { ...item, active: updatedActive } : item),
       }));
-      setToast(active ? "Cleaning task activated." : "Cleaning task deactivated.");
+      setToast(updatedActive ? "Cleaning task activated." : "Cleaning task deactivated.");
     } catch (error) {
       setToast(error instanceof Error ? error.message : "Could not update cleaning task status.");
     } finally {
@@ -472,43 +358,56 @@ export default function Dashboard({ section }: { section: Section }) {
     }
   }
 
-  function saveDuty(event: FormEvent<HTMLFormElement>) {
+  async function saveDuty(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!dutyModal) return;
     if (dutyModal.staffIds.length < 2) {
       setToast("Select at least two active staff members.");
       return;
     }
-    setStore((current) => {
-      const existing = current.duties.find((duty) => duty.date === dutyModal.date);
-      if (existing && existing.id !== dutyModal.id) {
-        const movedDuty = current.duties.find((duty) => duty.id === dutyModal.id);
-        return {
-          ...current,
-          duties: current.duties
-            .filter((duty) => duty.id !== dutyModal.id)
-            .map((duty) => duty.id === existing.id
-              ? {
-                  ...duty,
-                  staffIds: [...new Set([...duty.staffIds, ...dutyModal.staffIds])],
-                  completedTaskIds: [...new Set([...duty.completedTaskIds, ...(movedDuty?.completedTaskIds ?? [])])],
-                }
-              : duty),
-        };
-      }
-      if (dutyModal.id) {
-        return { ...current, duties: current.duties.map((duty) => duty.id === dutyModal.id ? { ...duty, date: dutyModal.date, staffIds: dutyModal.staffIds } : duty) };
-      }
-      return { ...current, duties: [...current.duties, { id: crypto.randomUUID(), date: dutyModal.date, staffIds: dutyModal.staffIds, completedTaskIds: [] }] };
-    });
-    setSelectedDate(dutyModal.date);
-    setDutyModal(null);
-    setToast("Cleaning duty saved.");
+    if (dutyModal.taskIds.length === 0) {
+      setToast("Select at least one active cleaning task.");
+      return;
+    }
+    try {
+      const savedDates = await saveDutyToDatabase(dutyModal);
+      setStore(await getDashboardData());
+      setSelectedDate(dutyModal.startDate);
+      setDutyModal(null);
+      setToast(
+        savedDates.length === 1
+          ? "Cleaning duty saved."
+          : `${savedDates.length} weekly cleaning duties saved.`,
+      );
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Could not save cleaning duty.");
+    }
   }
 
-  function deleteDuty(duty: Duty) {
-    setStore((current) => ({ ...current, duties: current.duties.filter((item) => item.id !== duty.id) }));
-    setToast("Cleaning duty removed.");
+  async function saveReminderSchedule(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setIsSavingReminderTime(true);
+    try {
+      const reminderTime = await saveReminderTimeToDatabase(reminderTimeDraft);
+      setStore((current) => ({ ...current, reminderTime }));
+      setToast("Reminder time saved.");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Could not save reminder time.");
+    } finally {
+      setIsSavingReminderTime(false);
+    }
+  }
+
+  async function deleteDuty(duty: Duty) {
+    try {
+      await deleteDutyFromDatabase(duty.id);
+      setStore((current) => ({ ...current, duties: current.duties.filter((item) => item.id !== duty.id) }));
+      setToast("Cleaning duty removed.");
+      return true;
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Could not remove cleaning duty.");
+      return false;
+    }
   }
 
   async function saveStaff(event: FormEvent<HTMLFormElement>) {
@@ -548,22 +447,11 @@ export default function Dashboard({ section }: { section: Section }) {
     if (staffModal) {
       setIsSavingStaff(true);
       try {
-        const supabase = createSupabaseBrowserClient();
-        const { data: updatedProfile, error } = await supabase
-          .from("profiles")
-          .update({ full_name: name, email })
-          .eq("id", staffModal.id)
-          .select("id")
-          .maybeSingle();
-
-        if (error) throw new Error(`Could not update staff details: ${error.message}`);
-        if (!updatedProfile) {
-          throw new Error("No profile was updated. Check that the profile exists and you have permission to update it.");
-        }
+        const updatedStaff = await updateStaffDetails({ id: staffModal.id, name, email });
 
         setStore((current) => ({
           ...current,
-          staff: current.staff.map((person) => person.id === staffModal.id ? { ...person, name, email } : person),
+          staff: current.staff.map((person) => person.id === staffModal.id ? updatedStaff : person),
         }));
         setToast("Staff details updated.");
         setStaffModal(null);
@@ -581,16 +469,7 @@ export default function Dashboard({ section }: { section: Section }) {
     const active = !person.active;
     setUpdatingStaffId(person.id);
     try {
-      const supabase = createSupabaseBrowserClient();
-      const { data, error } = await supabase
-        .from("profiles")
-        .update({ is_active: active })
-        .eq("id", person.id)
-        .select("id")
-        .maybeSingle();
-
-      if (error) throw new Error(`Could not update staff status: ${error.message}`);
-      if (!data) throw new Error("No profile was updated. Check that the profile exists and you have permission to update it.");
+      await toggleStaffStatus({ id: person.id, active, today });
 
       setStore((current) => ({
         ...current,
@@ -613,20 +492,13 @@ export default function Dashboard({ section }: { section: Section }) {
   const selectedStaff = selectedDuty?.staffIds
     .map((id) => store.staff.find((person) => person.id === id))
     .filter((person): person is Staff => Boolean(person));
-  const pageTitle: Record<Section, string> = {
-    Overview: "Good morning, Alex",
-    Schedule: "Cleaning schedule",
-    Team: "Your team",
-    Checklist: "Cleaning checklist",
-    Reminders: "Email reminders",
-  };
 
   return (
     <div className="min-h-screen bg-[#f7f8fc] text-slate-900">
       <aside className="fixed inset-y-0 left-0 z-20 hidden w-[248px] flex-col bg-[#101b36] px-5 py-6 text-white lg:flex">
         <Link href="/" className="flex items-center gap-3 px-2" aria-label="Duty Track home">
           <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#b8f26b] text-sm font-black text-[#14223d]">DT</span>
-          <span className="text-[17px] font-bold tracking-tight">dutytrack<span className="text-[#b8f26b]">.</span></span>
+          <span className="text-[17px] font-bold tracking-tight">DutyTrack<span className="text-[#b8f26b]"></span></span>
         </Link>
         <p className="mb-3 mt-10 px-3 text-[10px] font-bold uppercase tracking-[.18em] text-slate-500">Workspace</p>
         <nav className="space-y-1" aria-label="Main navigation">
@@ -634,18 +506,17 @@ export default function Dashboard({ section }: { section: Section }) {
             const icon = item === "Overview" ? "grid" : item === "Schedule" ? "calendar" : item === "Team" ? "users" : item === "Checklist" ? "check" : "mail";
             return (
               <Link key={item} href={SECTION_ROUTES[item]} aria-current={section === item ? "page" : undefined} className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-[13px] font-medium transition ${section === item ? "bg-white/10 text-[#c5f58a]" : "text-slate-400 hover:bg-white/5 hover:text-white"}`}>
-                <Icon name={icon} size={17} />{item}
-                {item === "Reminders" && <span className="ml-auto rounded-full bg-amber-400/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300">Setup</span>}
+                <Icon name={icon} size={17} />{sectionLabel(item)}
               </Link>
             );
           })}
         </nav>
         <div className="mt-auto border-t border-white/10 pt-4">
           <div className="mb-3 flex items-center gap-3 px-2">
-            <Avatar name="Alex Morgan" color="bg-violet-300 text-violet-900" size="h-9 w-9" />
+            <Avatar name={adminUser.name} color="bg-violet-300 text-violet-900" size="h-9 w-9" />
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-xs font-semibold">Alex Morgan</span>
-              <span className="block truncate text-[10px] text-slate-400">Workspace admin</span>
+              <span className="block truncate text-xs font-semibold">{adminUser.name}</span>
+              <span className="block truncate text-[10px] text-slate-400">{adminUser.email}</span>
             </span>
           </div>
           <button
@@ -665,8 +536,8 @@ export default function Dashboard({ section }: { section: Section }) {
         <header className="sticky top-0 z-10 flex h-[72px] items-center justify-between border-b border-slate-200/80 bg-white/90 px-5 backdrop-blur-md sm:px-8">
           <div className="flex items-center gap-3">
             <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#101b36] text-xs font-black text-[#b8f26b] lg:hidden">DT</span>
-            <div className="hidden text-xs text-slate-400 sm:block">Workspace <span className="mx-2 text-slate-300">/</span><span className="font-medium text-slate-600">{section}</span></div>
-            <span className="text-sm font-bold text-slate-900 sm:hidden">{section}</span>
+            <div className="hidden text-xs text-slate-400 sm:block">Workspace <span className="mx-2 text-slate-300">/</span><span className="font-medium text-slate-600">{sectionLabel(section)}</span></div>
+            <span className="text-sm font-bold text-slate-900 sm:hidden">{sectionLabel(section)}</span>
           </div>
           <div className="flex items-center gap-3 sm:gap-5">
             <span className="hidden text-xs font-medium text-slate-500 md:block">{formatDate(today, { weekday: "long", month: "long", day: "numeric" })}</span>
@@ -679,7 +550,6 @@ export default function Dashboard({ section }: { section: Section }) {
             >
               <Icon name={isLoggingOut ? "clock" : "logout"} size={17} />
             </button>
-            <Link href={SECTION_ROUTES.Reminders} className="relative flex h-9 w-9 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100" aria-label="View reminders"><Icon name="bell" size={18} /><span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-amber-400" /></Link>
             <button onClick={() => navigateToSection("Schedule", { date: selectedDate, newDuty: true })} className="inline-flex items-center gap-2 rounded-xl bg-[#b8f26b] px-3.5 py-2.5 text-xs font-bold text-[#1b2b42] shadow-sm transition hover:bg-[#a8e95a] sm:px-4"><Icon name="plus" size={15} /><span className="hidden sm:inline">New duty</span><span className="sm:hidden">Add</span></button>
           </div>
         </header>
@@ -687,22 +557,28 @@ export default function Dashboard({ section }: { section: Section }) {
         <div className="flex min-h-[calc(100vh-72px)]">
           <nav className="fixed bottom-0 left-0 right-0 z-30 flex justify-around border-t border-slate-200 bg-white px-2 py-2 lg:hidden" aria-label="Mobile navigation">
             {(["Overview", "Schedule", "Team", "Checklist", "Reminders"] as Section[]).map((item) => (
-              <Link key={item} href={SECTION_ROUTES[item]} aria-label={item} aria-current={section === item ? "page" : undefined} className={`flex flex-col items-center gap-1 px-2 py-1 text-[9px] font-medium ${section === item ? "text-indigo-700" : "text-slate-400"}`}>
-                <Icon name={item === "Overview" ? "grid" : item === "Schedule" ? "calendar" : item === "Team" ? "users" : item === "Checklist" ? "check" : "mail"} size={18} />{item}
+              <Link key={item} href={SECTION_ROUTES[item]} aria-label={sectionLabel(item)} aria-current={section === item ? "page" : undefined} className={`flex flex-col items-center gap-1 px-2 py-1 text-[9px] font-medium ${section === item ? "text-indigo-700" : "text-slate-400"}`}>
+                <Icon name={item === "Overview" ? "grid" : item === "Schedule" ? "calendar" : item === "Team" ? "users" : item === "Checklist" ? "check" : "mail"} size={18} />{sectionLabel(item)}
               </Link>
             ))}
           </nav>
           <main className="mx-auto w-full max-w-[1400px] px-5 pb-24 pt-7 sm:px-8 lg:px-10 lg:pb-10 lg:pt-9">
-            <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
-              <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[.16em] text-indigo-600">{section === "Overview" ? formatDate(today, { weekday: "long", month: "long", day: "numeric" }) : "Workspace management"}</p>
-                <h1 className="mt-1.5 text-[26px] font-bold tracking-tight text-[#17233c] sm:text-[30px]">{pageTitle[section]}</h1>
-                <p className="mt-1 text-sm text-slate-500">{section === "Overview" ? "Here’s what’s happening with your office duties today." : section === "Schedule" ? "Plan and manage your team’s cleaning duties." : section === "Team" ? "Manage the people who keep your workplace fresh." : section === "Checklist" ? "Stay on top of today’s shared cleaning tasks." : "Keep your team informed before every duty."}</p>
+            {section !== "Team" && (
+              <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
+                {section === "Schedule" && (
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[.16em] text-indigo-600">Duty Schedule</p>
+                  </div>
+                )}
+                {section === "Checklist" && (
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[.16em] text-indigo-600">Task Management</p>
+                  </div>
+                )}
+                {section === "Schedule" && <button onClick={() => setDutyModal(createDutyDraft(selectedDate))} className="inline-flex items-center gap-2 rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d]"><Icon name="plus" size={15} />Assign a duty</button>}
+                {section === "Checklist" && <button onClick={() => setTaskModal("new")} className="inline-flex items-center gap-2 rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d]"><Icon name="plus" size={15} />Add task</button>}
               </div>
-              {section === "Team" && <button onClick={() => setStaffModal("new")} className="inline-flex items-center gap-2 rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d]"><Icon name="plus" size={15} />Add staff member</button>}
-              {section === "Schedule" && <button onClick={() => setDutyModal({ date: selectedDate, staffIds: [] })} className="inline-flex items-center gap-2 rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d]"><Icon name="plus" size={15} />Assign a duty</button>}
-              {section === "Checklist" && <button onClick={() => setTaskModal("new")} className="inline-flex items-center gap-2 rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d]"><Icon name="plus" size={15} />Add task</button>}
-            </div>
+            )}
 
             {section === "Overview" && (
               <>
@@ -716,7 +592,6 @@ export default function Dashboard({ section }: { section: Section }) {
                   <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div><h2 className="text-base font-bold text-[#17233c]">Today’s cleaning team</h2><p className="mt-1 text-xs text-slate-500">{formatDate(today, { weekday: "long", month: "long", day: "numeric" })}</p></div>
-                      <button onClick={() => navigateToSection("Checklist", { date: today })} className="text-xs font-semibold text-indigo-600 hover:text-indigo-800">Open checklist <span aria-hidden="true">→</span></button>
                     </div>
                     {todayDuty ? (
                       <>
@@ -730,8 +605,8 @@ export default function Dashboard({ section }: { section: Section }) {
                           ))}
                         </div>
                         <div className="mt-5 border-t border-slate-100 pt-4">
-                          <div className="mb-3 flex items-center justify-between"><p className="text-xs font-semibold text-slate-700">Today’s task progress</p><p className="text-[11px] font-semibold text-slate-500">{completedTaskCount(todayDuty)} of {activeTasks.length} complete</p></div>
-                          <ProgressBar value={completedTaskCount(todayDuty)} total={activeTasks.length} />
+                          <div className="mb-3 flex items-center justify-between"><p className="text-xs font-semibold text-slate-700">Today’s task progress</p><p className="text-[11px] font-semibold text-slate-500">{completedTaskCount(todayDuty)} of {todayTasks.length} complete</p></div>
+                          <ProgressBar value={completedTaskCount(todayDuty)} total={todayTasks.length} />
                         </div>
                       </>
                     ) : <EmptyState title="No team assigned yet" text="Add at least two staff members to today’s cleaning duty." action="Assign today’s duty" onClick={() => navigateToSection("Schedule", { date: today, newDuty: true })} />}
@@ -746,14 +621,14 @@ export default function Dashboard({ section }: { section: Section }) {
                 </section>
                 <section className="mt-5 grid gap-5 xl:grid-cols-[1fr_.85fr]">
                   <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
-                    <div className="flex items-center justify-between"><div><h2 className="text-base font-bold text-[#17233c]">Cleaning checklist</h2><p className="mt-1 text-xs text-slate-500">Tasks for today’s duty</p></div><span className="rounded-full bg-indigo-50 px-3 py-1 text-[10px] font-semibold text-indigo-700">{activeTasks.length} tasks</span></div>
-                    {todayDuty ? <div className="mt-4 space-y-1">{activeTasks.slice(0, 4).map((task) => <TaskRow key={task.id} task={task} done={todayDuty.completedTaskIds.includes(task.id)} onToggle={() => toggleTask(todayDuty, task.id)} />)}</div> : <p className="mt-5 text-sm text-slate-400">Assign a team to see their checklist.</p>}
+                    <div className="flex items-center justify-between"><div><h2 className="text-base font-bold text-[#17233c]">Cleaning checklist</h2><p className="mt-1 text-xs text-slate-500">Tasks for today’s duty</p></div><span className="rounded-full bg-indigo-50 px-3 py-1 text-[10px] font-semibold text-indigo-700">{todayTasks.length} tasks</span></div>
+                    {todayDuty ? <div className="mt-4 space-y-1">{todayTasks.slice(0, 4).map((task) => <TaskRow key={task.id} task={task} done={todayDuty.completedTaskIds.includes(task.id)} onToggle={() => toggleTask(todayDuty, task.id)} />)}</div> : <p className="mt-5 text-sm text-slate-400">Assign a team to see their checklist.</p>}
                     <button onClick={() => navigateToSection("Checklist")} className="mt-4 w-full rounded-xl border border-slate-200 py-2.5 text-xs font-semibold text-slate-600 transition hover:border-indigo-200 hover:text-indigo-700">View all cleaning tasks</button>
                   </div>
                   <div className="rounded-2xl border border-[#dfe8ff] bg-[#f1f5ff] p-5 sm:p-6">
                     <div className="flex items-start gap-3">
                       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white text-indigo-600 shadow-sm"><Icon name="mail" size={17} /></span>
-                      <div><p className="text-sm font-bold text-[#17233c]">Duty day reminders</p><p className="mt-1 text-xs leading-5 text-slate-600">Email reminders are planned for 8:00 AM on each duty day. Connect an email provider to enable delivery.</p></div>
+                      <div><p className="text-sm font-bold text-[#17233c]">Duty day reminders</p><p className="mt-1 text-xs leading-5 text-slate-600">Email reminders are scheduled for {formatTime(store.reminderTime)} Malaysia time on each duty day.</p></div>
                     </div>
                     <button onClick={() => navigateToSection("Reminders")} className="mt-4 text-xs font-bold text-indigo-700 hover:text-indigo-900">Configure reminders <span aria-hidden="true">→</span></button>
                   </div>
@@ -772,53 +647,123 @@ export default function Dashboard({ section }: { section: Section }) {
                   </div>
                   <div className="flex rounded-lg bg-slate-100 p-1">{(["Day", "Week", "Month"] as const).map((mode) => <button key={mode} onClick={() => setCalendarMode(mode)} className={`rounded-md px-3 py-1.5 text-[11px] font-semibold ${calendarMode === mode ? "bg-white text-slate-800 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{mode}</button>)}</div>
                 </div>
-                <CalendarView mode={calendarMode} selectedDate={selectedDate} today={today} duties={store.duties} staff={store.staff} taskCount={activeTasks.length} onSelect={(date) => { setSelectedDate(date); if (store.duties.some((duty) => duty.date === date)) navigateToSection("Checklist", { date }); }} onAdd={(date) => setDutyModal({ date, staffIds: [] })} onEdit={(duty) => setDutyModal({ id: duty.id, date: duty.date, staffIds: duty.staffIds })} />
+                <CalendarView mode={calendarMode} selectedDate={selectedDate} today={today} duties={store.duties} staff={store.staff} onSelect={(date) => { setSelectedDate(date); if (store.duties.some((duty) => duty.date === date)) navigateToSection("Checklist", { date }); }} onAdd={(date) => setDutyModal(createDutyDraft(date))} onEdit={(duty) => setDutyModal({ id: duty.id, startDate: duty.date, endDate: duty.date, repeatWeekly: false, repeatDays: [], staffIds: duty.staffIds, taskIds: duty.taskIds })} />
               </section>
             )}
 
             {section === "Team" && (
-              <section className="rounded-2xl border border-slate-200/80 bg-white shadow-sm">
-                <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 px-5 py-4 sm:px-6">
-                  <div><h2 className="text-sm font-bold text-[#17233c]">Staff members <span className="ml-1 rounded-md bg-slate-100 px-2 py-1 text-[10px] text-slate-500">{activeStaff.length} active</span></h2><p className="mt-1 text-xs text-slate-500">Add and manage your cleaning team.</p></div>
-                  <label className="relative block"><span className="sr-only">Search staff</span><span className="pointer-events-none absolute left-3 top-2.5 text-slate-400"><Icon name="search" size={15} /></span><input value={staffSearch} onChange={(event) => setStaffSearch(event.target.value)} placeholder="Search staff..." className="w-full rounded-lg border border-slate-200 py-2 pl-9 pr-3 text-xs outline-none focus:border-indigo-300 sm:w-56" /></label>
+              <>
+                <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[.16em] text-indigo-600">Staff management</p>
+                  </div>
+                  <button onClick={() => setStaffModal("new")} className="inline-flex items-center gap-2 rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d]">
+                    <Icon name="plus" size={15} />
+                    Add staff member
+                  </button>
                 </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[650px] text-left">
-                    <thead><tr className="border-b border-slate-100 text-[10px] font-bold uppercase tracking-wider text-slate-400"><th className="px-6 py-3">Team member</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Upcoming duties</th><th className="px-5 py-3 text-right">Actions</th></tr></thead>
-                    <tbody>{store.staff.filter((person) => `${person.name} ${person.email}`.toLowerCase().includes(staffSearch.toLowerCase())).map((person, index) => {
-                      const count = store.duties.filter((duty) => duty.date >= today && duty.staffIds.includes(person.id)).length;
-                      return <tr key={person.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/60">
-                        <td className="px-6 py-4"><div className="flex items-center gap-3"><Avatar name={person.name} color={["bg-indigo-100 text-indigo-700", "bg-emerald-100 text-emerald-700", "bg-amber-100 text-amber-700", "bg-rose-100 text-rose-700", "bg-sky-100 text-sky-700"][index % 5]} /><div><p className={`text-xs font-semibold ${person.active ? "text-slate-800" : "text-slate-400"}`}>{person.name}</p><p className="mt-1 text-[11px] text-slate-500">{person.email}</p></div></div></td>
-                        <td className="px-4 py-4"><span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold ${person.active ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}><span className={`h-1.5 w-1.5 rounded-full ${person.active ? "bg-emerald-500" : "bg-slate-400"}`} />{person.active ? "Active" : "Inactive"}</span></td>
-                        <td className="px-4 py-4 text-xs text-slate-600">{count} {count === 1 ? "duty" : "duties"}</td>
-                        <td className="px-5 py-4"><div className="flex justify-end gap-2"><button onClick={() => setStaffModal(person)} aria-label={`Edit ${person.name}`} className="rounded-lg p-2 text-slate-400 hover:bg-indigo-50 hover:text-indigo-700"><Icon name="edit" size={15} /></button><button onClick={() => toggleStaff(person)} disabled={updatingStaffId !== null} className={`rounded-lg px-2.5 py-2 text-[10px] font-semibold disabled:cursor-not-allowed disabled:opacity-60 ${person.active ? "text-slate-500 hover:bg-rose-50 hover:text-rose-600" : "text-emerald-700 hover:bg-emerald-50"}`}>{updatingStaffId === person.id ? "Saving..." : person.active ? "Deactivate" : "Reactivate"}</button></div></td>
-                      </tr>;
-                    })}</tbody>
-                  </table>
-                  {teamLoading && <p role="status" className="p-6 text-center text-xs text-slate-500">Loading team from profiles...</p>}
-                  {!teamLoading && teamError && <p role="alert" className="m-4 rounded-xl border border-rose-100 bg-rose-50 p-4 text-xs text-rose-700">{teamError}</p>}
-                  {!teamLoading && !teamError && !store.staff.length && <EmptyState title="No staff members yet" text="Add your first team member to get started." action="Add staff member" onClick={() => setStaffModal("new")} />}
-                </div>
-              </section>
+
+                <section className="rounded-2xl border border-slate-200/80 bg-white shadow-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 px-5 py-4 sm:px-6">
+                    <div>
+                      <h2 className="text-sm font-bold text-[#17233c]">
+                        Staff members <span className="ml-1 rounded-md bg-slate-100 px-2 py-1 text-[10px] text-slate-500">{activeStaffCount} active</span>
+                      </h2>
+                      <p className="mt-1 text-xs text-slate-500">Add and manage your cleaning team.</p>
+                    </div>
+                    <label className="relative block">
+                      <span className="sr-only">Search staff</span>
+                      <span className="pointer-events-none absolute left-3 top-2.5 text-slate-400"><Icon name="search" size={15} /></span>
+                      <input
+                        value={staffSearch}
+                        onChange={(event) => setStaffSearch(event.target.value)}
+                        placeholder="Search staff..."
+                        className="w-full rounded-lg border border-slate-200 py-2 pl-9 pr-3 text-xs outline-none focus:border-indigo-300 sm:w-56"
+                      />
+                    </label>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[650px] text-left">
+                      <thead>
+                        <tr className="border-b border-slate-100 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                          <th className="px-6 py-3">Team member</th>
+                          <th className="px-4 py-3">Status</th>
+                          <th className="px-4 py-3">Upcoming duties</th>
+                          <th className="px-5 py-3 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredStaff.map((person, index) => {
+                          const dutyCount = store.duties.filter(
+                            (duty) => duty.date >= today && duty.staffIds.includes(person.id),
+                          ).length;
+                          const avatarColors = [
+                            "bg-indigo-100 text-indigo-700",
+                            "bg-emerald-100 text-emerald-700",
+                            "bg-amber-100 text-amber-700",
+                            "bg-rose-100 text-rose-700",
+                            "bg-sky-100 text-sky-700",
+                          ];
+                          return (
+                            <tr key={person.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/60">
+                              <td className="px-6 py-4">
+                                <div className="flex items-center gap-3">
+                                  <Avatar name={person.name} color={avatarColors[index % avatarColors.length]} />
+                                  <div>
+                                    <p className={`text-xs font-semibold ${person.active ? "text-slate-800" : "text-slate-400"}`}>{person.name}</p>
+                                    <p className="mt-1 text-[11px] text-slate-500">{person.email}</p>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-4 py-4">
+                                <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold ${person.active ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+                                  <span className={`h-1.5 w-1.5 rounded-full ${person.active ? "bg-emerald-500" : "bg-slate-400"}`} />
+                                  {person.active ? "Active" : "Inactive"}
+                                </span>
+                              </td>
+                              <td className="px-4 py-4 text-xs text-slate-600">{dutyCount} {dutyCount === 1 ? "duty" : "duties"}</td>
+                              <td className="px-5 py-4">
+                                <div className="flex justify-end gap-2">
+                                  <button onClick={() => setStaffModal(person)} aria-label={`Edit ${person.name}`} className="rounded-lg p-2 text-slate-400 hover:bg-indigo-50 hover:text-indigo-700">
+                                    <Icon name="edit" size={15} />
+                                  </button>
+                                  <button
+                                    onClick={() => toggleStaff(person)}
+                                    disabled={updatingStaffId !== null}
+                                    className={`rounded-lg px-2.5 py-2 text-[10px] font-semibold disabled:cursor-not-allowed disabled:opacity-60 ${person.active ? "text-slate-500 hover:bg-rose-50 hover:text-rose-600" : "text-emerald-700 hover:bg-emerald-50"}`}
+                                  >
+                                    {updatingStaffId === person.id ? "Saving..." : person.active ? "Deactivate" : "Reactivate"}
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        {!teamLoading && !teamError && !filteredStaff.length && store.staff.length > 0 && (
+                          <tr><td colSpan={4} className="px-6 py-8 text-center text-xs text-slate-500">No staff members match your search.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                    {teamLoading && <p role="status" className="p-6 text-center text-xs text-slate-500">Loading team from profiles...</p>}
+                    {!teamLoading && teamError && <p role="alert" className="m-4 rounded-xl border border-rose-100 bg-rose-50 p-4 text-xs text-rose-700">{teamError}</p>}
+                    {!teamLoading && !teamError && !store.staff.length && (
+                      <div className="py-10 text-center">
+                        <span className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-slate-100 text-slate-400"><Icon name="calendar" size={18} /></span>
+                        <p className="mt-3 text-sm font-semibold text-slate-700">No staff members yet</p>
+                        <p className="mt-1 text-xs text-slate-500">Add your first team member to get started.</p>
+                        <button onClick={() => setStaffModal("new")} className="mt-4 rounded-lg bg-[#172543] px-3.5 py-2 text-[11px] font-semibold text-white hover:bg-[#24375d]">
+                          Add staff member
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </section>
+              </>
             )}
 
             {section === "Checklist" && (
-              <div className="grid gap-5 xl:grid-cols-[1.2fr_.8fr]">
-                <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div><h2 className="text-base font-bold text-[#17233c]">Duty tasks</h2><p className="mt-1 text-xs text-slate-500">Mark each task complete as you go.</p></div>
-                    <input type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-700 outline-none focus:border-indigo-300" />
-                  </div>
-                  {selectedDuty ? <>
-                    <div className="mt-5 rounded-xl bg-[#f7f8fc] p-4"><p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Assigned team</p><div className="mt-3 flex flex-wrap gap-2">{selectedStaff?.map((person) => <span key={person.id} className="inline-flex items-center gap-2 rounded-full bg-white py-1 pl-1 pr-3 text-[11px] font-semibold text-slate-700"><Avatar name={person.name} size="h-6 w-6" />{person.name}</span>)}</div></div>
-                    {tasksLoading ? <p role="status" className="mt-5 text-xs text-slate-500">Loading cleaning tasks...</p>
-                      : tasksError ? <p role="alert" className="mt-5 rounded-xl border border-rose-100 bg-rose-50 p-4 text-xs text-rose-700">{tasksError}</p>
-                        : activeTasks.length ? <div className="mt-5 space-y-2">{activeTasks.map((task) => <TaskRow key={task.id} task={task} done={selectedDuty.completedTaskIds.includes(task.id)} onToggle={() => toggleTask(selectedDuty, task.id)} large />)}</div>
-                          : <p className="mt-5 text-sm text-slate-400">There are no active cleaning tasks.</p>}
-                    <div className="mt-5 flex items-center justify-between border-t border-slate-100 pt-4"><span className="text-xs font-semibold text-slate-500">{completedTaskCount(selectedDuty)} of {activeTasks.length} tasks completed</span><span className={`rounded-full px-3 py-1 text-[10px] font-semibold ${activeTasks.length > 0 && completedTaskCount(selectedDuty) === activeTasks.length ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{activeTasks.length > 0 && completedTaskCount(selectedDuty) === activeTasks.length ? "Duty complete" : "In progress"}</span></div>
-                  </> : <EmptyState title="No cleaning duty for this date" text="Choose another date or assign a team to get started." action="Assign a duty" onClick={() => setDutyModal({ date: selectedDate, staffIds: [] })} />}
-                </section>
-                <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
+              <div className="grid gap-5">
+                <section className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-sm sm:p-8">
                   <h2 className="text-base font-bold text-[#17233c]">Manage cleaning tasks</h2><p className="mt-1 text-xs leading-5 text-slate-500">Add, edit, or deactivate checklist tasks.</p>
                   {tasksLoading && <p role="status" className="mt-5 text-xs text-slate-500">Loading cleaning tasks...</p>}
                   {!tasksLoading && tasksError && <p role="alert" className="mt-5 rounded-xl border border-rose-100 bg-rose-50 p-4 text-xs text-rose-700">{tasksError}</p>}
@@ -842,18 +787,36 @@ export default function Dashboard({ section }: { section: Section }) {
               <div className="grid gap-5 xl:grid-cols-[1fr_.9fr]">
                 <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
                   <div className="flex items-start gap-4"><span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-700"><Icon name="mail" size={20} /></span><div><h2 className="text-base font-bold text-[#17233c]">Duty day email reminders</h2><p className="mt-1 text-xs leading-5 text-slate-500">Send each assigned team member a reminder on the day of their cleaning duty.</p></div></div>
-                  <div className="mt-6 flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-3"><div className="flex items-center gap-2.5"><span className="h-2 w-2 rounded-full bg-amber-500" /><div><p className="text-xs font-bold text-amber-900">Email delivery not connected</p><p className="mt-0.5 text-[10px] text-amber-800">An email provider and server-side scheduler are needed to send reminders.</p></div></div><span className="rounded-full bg-white px-2.5 py-1 text-[9px] font-bold text-amber-800">Setup needed</span></div>
+                  <form onSubmit={saveReminderSchedule} className="mt-4 flex flex-wrap items-end gap-3 rounded-xl border border-slate-100 bg-slate-50 p-4">
+                    <label className="flex flex-1 flex-col gap-1.5 text-xs font-semibold text-slate-700">
+                      Reminder time (Malaysia time)
+                      <input
+                        type="time"
+                        required
+                        value={reminderTimeDraft}
+                        onChange={(event) => setReminderTimeDraft(event.target.value)}
+                        className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-800 outline-none focus:border-indigo-400"
+                      />
+                    </label>
+                    <button
+                      type="submit"
+                      disabled={isSavingReminderTime || reminderTimeDraft === store.reminderTime}
+                      className="rounded-lg bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {isSavingReminderTime ? "Saving..." : "Save time"}
+                    </button>
+                  </form>
                   <div className="mt-5 divide-y divide-slate-100 rounded-xl border border-slate-100">
-                    <div className="flex items-center justify-between px-4 py-3.5"><div><p className="text-xs font-semibold text-slate-700">Send time</p><p className="mt-1 text-[10px] text-slate-500">On each assigned duty day</p></div><span className="inline-flex items-center gap-2 text-xs font-semibold text-slate-700"><Icon name="clock" size={14} />8:00 AM</span></div>
-                    <div className="flex items-center justify-between px-4 py-3.5"><div><p className="text-xs font-semibold text-slate-700">Duplicate protection</p><p className="mt-1 text-[10px] text-slate-500">One reminder per person, per duty date</p></div><span className="rounded-full bg-slate-100 px-2.5 py-1 text-[9px] font-semibold text-slate-600">Planned</span></div>
-                    <div className="flex items-center justify-between px-4 py-3.5"><div><p className="text-xs font-semibold text-slate-700">Reminder includes</p><p className="mt-1 text-[10px] text-slate-500">Duty date, assigned team, and cleaning tasks</p></div><span className="text-[10px] font-semibold text-slate-500">{activeTasks.length} tasks</span></div>
+                    <div className="flex items-center justify-between px-4 py-3.5"><div><p className="text-xs font-semibold text-slate-700">Send time</p><p className="mt-1 text-[10px] text-slate-500">On each assigned duty day, Malaysia time</p></div><span className="inline-flex items-center gap-2 text-xs font-semibold text-slate-700"><Icon name="clock" size={14} />{formatTime(store.reminderTime)}</span></div>
+                    <div className="flex items-center justify-between px-4 py-3.5"><div><p className="text-xs font-semibold text-slate-700">Duplicate protection</p><p className="mt-1 text-[10px] text-slate-500">Tracked per staff member and duty date</p></div><span className="rounded-full bg-slate-100 px-2.5 py-1 text-[9px] font-semibold text-slate-600">Enabled</span></div>
+                    <div className="flex items-center justify-between px-4 py-3.5"><div><p className="text-xs font-semibold text-slate-700">Reminder includes</p><p className="mt-1 text-[10px] text-slate-500">Duty date, assigned team, and cleaning tasks</p></div><span className="text-[10px] font-semibold text-slate-500">{todayTasks.length} tasks</span></div>
                   </div>
                 </section>
                 <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
                   <h2 className="text-base font-bold text-[#17233c]">Reminder preview</h2><p className="mt-1 text-xs text-slate-500">A preview of the email assigned staff will receive.</p>
                   {todayDuty ? <div className="mt-5 overflow-hidden rounded-xl border border-slate-200">
                     <div className="flex items-center gap-2 bg-[#172543] px-4 py-3"><span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[#b8f26b] text-[9px] font-black text-[#172543]">DT</span><span className="text-xs font-semibold text-white">Your cleaning duty is today</span></div>
-                    <div className="p-4"><p className="text-[10px] text-slate-400">To: {todayDuty.staffIds.map((id) => store.staff.find((person) => person.id === id)?.email).filter(Boolean).join(", ")}</p><p className="mt-4 text-xs font-bold text-slate-800">Hi team,</p><p className="mt-2 text-xs leading-5 text-slate-600">You’re scheduled for the office cleaning duty today, {formatDate(today, { weekday: "long", month: "long", day: "numeric" })}.</p><p className="mt-4 text-[10px] font-bold uppercase tracking-wider text-slate-500">Today’s cleaning tasks</p><ul className="mt-2 space-y-2">{activeTasks.map((task) => <li key={task.id} className="flex items-center gap-2 text-[11px] text-slate-600"><span className="h-1.5 w-1.5 rounded-full bg-indigo-400" />{task.label}</li>)}</ul><p className="mt-4 text-xs text-slate-600">Thanks for keeping our office fresh!</p></div>
+                    <div className="p-4"><p className="text-[10px] text-slate-400">To: {todayDuty.staffIds.map((id) => store.staff.find((person) => person.id === id)?.email).filter(Boolean).join(", ")}</p><p className="mt-4 text-xs font-bold text-slate-800">Hi team,</p><p className="mt-2 text-xs leading-5 text-slate-600">You’re scheduled for the office cleaning duty today, {formatDate(today, { weekday: "long", month: "long", day: "numeric" })}.</p><p className="mt-4 text-[10px] font-bold uppercase tracking-wider text-slate-500">Today’s cleaning tasks</p><ul className="mt-2 space-y-2">{todayTasks.map((task) => <li key={task.id} className="flex items-center gap-2 text-[11px] text-slate-600"><span className="h-1.5 w-1.5 rounded-full bg-indigo-400" />{task.label}</li>)}</ul><p className="mt-4 text-xs text-slate-600">Thanks for keeping our office fresh!</p></div>
                   </div> : <p className="mt-5 rounded-xl bg-slate-50 p-4 text-xs text-slate-500">Assign a team to today’s duty to preview a reminder.</p>}
                 </section>
               </div>
@@ -862,25 +825,163 @@ export default function Dashboard({ section }: { section: Section }) {
         </div>
       </div>
 
-      {dutyModal && <Modal title={dutyModal.id ? "Edit cleaning duty" : "Assign a cleaning duty"} onClose={() => setDutyModal(null)}>
+      {dutyModal && <Modal title={dutyModal.id ? "Edit cleaning duty" : "Assign cleaning duty"} className="max-w-3xl" onClose={() => setDutyModal(null)}>
         <form onSubmit={saveDuty} className="space-y-5">
-          <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Duty date</span><input type="date" required value={dutyModal.date} onChange={(event) => setDutyModal({ ...dutyModal, date: event.target.value })} className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
-          <fieldset><legend className="mb-2 text-xs font-semibold text-slate-700">Assign staff <span className="font-normal text-slate-400">(select at least 2)</span></legend><div className="max-h-64 space-y-1 overflow-y-auto rounded-xl border border-slate-200 p-2">{activeStaff.map((person) => <label key={person.id} className="flex cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2.5 hover:bg-slate-50"><input type="checkbox" checked={dutyModal.staffIds.includes(person.id)} onChange={(event) => setDutyModal({ ...dutyModal, staffIds: event.target.checked ? [...dutyModal.staffIds, person.id] : dutyModal.staffIds.filter((id) => id !== person.id) })} className="h-4 w-4 rounded border-slate-300 accent-indigo-600" /><Avatar name={person.name} size="h-8 w-8" /><span className="min-w-0 flex-1"><span className="block text-xs font-semibold text-slate-800">{person.name}</span><span className="block truncate text-[10px] text-slate-500">{person.email}</span></span></label>)}{!activeStaff.length && <p className="p-4 text-xs text-slate-500">Add active team members before creating a duty.</p>}</div><p className="mt-2 text-[10px] text-slate-500">{dutyModal.staffIds.length} selected</p></fieldset>
+          {!dutyModal.id && (
+            <label className="flex cursor-pointer items-center gap-2 text-xs font-semibold text-slate-700">
+              <input
+                type="checkbox"
+                checked={dutyModal.repeatWeekly}
+                onChange={(event) => {
+                  if (event.target.checked) {
+                    const weekday = new Date(`${dutyModal.startDate}T00:00:00`).getDay();
+                    setDutyModal({ ...dutyModal, repeatWeekly: true, repeatDays: [weekday] });
+                  } else {
+                    setDutyModal({
+                      ...dutyModal,
+                      repeatWeekly: false,
+                      repeatDays: [],
+                      endDate: dutyModal.startDate,
+                    });
+                  }
+                }}
+                className="h-4 w-4 rounded border-slate-300 accent-indigo-600"
+              />
+              Repeat weekly
+            </label>
+          )}
+          <div className={dutyModal.repeatWeekly ? "grid gap-4 sm:grid-cols-2" : ""}>
+            <label className="block">
+              <span className="mb-2 block text-xs font-semibold text-slate-700">
+                {dutyModal.id ? "Duty date" : "Start date"}
+              </span>
+              <input
+                type="date"
+                required
+                value={dutyModal.startDate}
+                onChange={(event) => {
+                  const startDate = event.target.value;
+                  setDutyModal({
+                    ...dutyModal,
+                    startDate,
+                    endDate: dutyModal.repeatWeekly && dutyModal.endDate < startDate
+                      ? startDate
+                      : dutyModal.repeatWeekly ? dutyModal.endDate : startDate,
+                  });
+                }}
+                className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+              />
+            </label>
+            {dutyModal.repeatWeekly && (
+              <label className="block">
+                <span className="mb-2 block text-xs font-semibold text-slate-700">End date</span>
+                <input
+                  type="date"
+                  required
+                  min={dutyModal.startDate}
+                max={getOneYearLater(dutyModal.startDate)}
+                  value={dutyModal.endDate}
+                  onChange={(event) => setDutyModal({ ...dutyModal, endDate: event.target.value })}
+                  className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+                />
+                <span className="mt-1 block text-[10px] text-slate-500">Repeat schedules can span up to one year.</span>
+              </label>
+            )}
+          </div>
+          {dutyModal.repeatWeekly && (
+            <fieldset>
+              <legend className="mb-2 text-xs font-semibold text-slate-700">Repeat on</legend>
+              <div className="flex flex-wrap gap-2">
+                {WEEK_DAYS.map(({ value, label }) => (
+                  <label key={value} className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-2 text-xs font-medium text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={dutyModal.repeatDays.includes(value)}
+                      onChange={(event) => setDutyModal({
+                        ...dutyModal,
+                        repeatDays: event.target.checked
+                          ? [...dutyModal.repeatDays, value]
+                          : dutyModal.repeatDays.filter((day) => day !== value),
+                      })}
+                      className="h-3.5 w-3.5 rounded border-slate-300 accent-indigo-600"
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+          )}
+          <div className="grid gap-4 md:grid-cols-2">
+            <fieldset>
+              <legend className="mb-2 text-xs font-semibold text-slate-700">
+                Assign staff <span className="font-normal text-slate-400">(select at least 2)</span>
+              </legend>
+              <div className="max-h-64 space-y-1 overflow-y-auto rounded-xl border border-slate-200 p-2">
+                {activeStaff.map((person) => (
+                  <label key={person.id} className="flex cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2.5 hover:bg-slate-50">
+                    <input
+                      type="checkbox"
+                      checked={dutyModal.staffIds.includes(person.id)}
+                      onChange={(event) => setDutyModal({
+                        ...dutyModal,
+                        staffIds: event.target.checked
+                          ? [...dutyModal.staffIds, person.id]
+                          : dutyModal.staffIds.filter((id) => id !== person.id),
+                      })}
+                      className="h-4 w-4 rounded border-slate-300 accent-indigo-600"
+                    />
+                    <Avatar name={person.name} size="h-8 w-8" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-xs font-semibold text-slate-800">{person.name}</span>
+                      <span className="block truncate text-[10px] text-slate-500">{person.email}</span>
+                    </span>
+                  </label>
+                ))}
+                {!activeStaff.length && <p className="p-4 text-xs text-slate-500">Add active team members before creating a duty.</p>}
+              </div>
+              <p className="mt-2 text-[10px] text-slate-500">{dutyModal.staffIds.length} selected</p>
+            </fieldset>
+            <fieldset>
+              <legend className="mb-2 text-xs font-semibold text-slate-700">
+                Assign tasks <span className="font-normal text-slate-400">(select at least 1)</span>
+              </legend>
+              <div className="max-h-64 space-y-1 overflow-y-auto rounded-xl border border-slate-200 p-2">
+                {activeTasks.map((task) => (
+                  <label key={task.id} className="flex cursor-pointer items-start gap-2.5 rounded-lg px-2.5 py-2.5 hover:bg-slate-50">
+                    <input
+                      type="checkbox"
+                      checked={dutyModal.taskIds.includes(task.id)}
+                      onChange={(event) => setDutyModal({
+                        ...dutyModal,
+                        taskIds: event.target.checked
+                          ? [...dutyModal.taskIds, task.id]
+                          : dutyModal.taskIds.filter((id) => id !== task.id),
+                      })}
+                      className="mt-0.5 h-4 w-4 rounded border-slate-300 accent-indigo-600"
+                    />
+                    <span className="text-xs font-semibold text-slate-800">{task.label}</span>
+                  </label>
+                ))}
+                {!activeTasks.length && <p className="p-4 text-xs text-slate-500">Add an active cleaning task before creating a duty.</p>}
+              </div>
+              <p className="mt-2 text-[10px] text-slate-500">{dutyModal.taskIds.length} selected</p>
+            </fieldset>
+          </div>
           <div className="flex justify-between gap-2 border-t border-slate-100 pt-4">
-            {dutyModal.id ? <button type="button" onClick={() => { const duty = store.duties.find((item) => item.id === dutyModal.id); if (duty) deleteDuty(duty); setDutyModal(null); }} className="inline-flex items-center gap-1.5 rounded-xl px-2 py-2.5 text-xs font-semibold text-rose-600 hover:bg-rose-50"><Icon name="trash" size={14} />Remove duty</button> : <span />}
-            <div className="flex gap-2"><button type="button" onClick={() => setDutyModal(null)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button type="submit" className="rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d]">{dutyModal.id ? "Save changes" : "Assign duty"}</button></div>
+            {dutyModal.id ? <button type="button" onClick={async () => { const duty = store.duties.find((item) => item.id === dutyModal.id); if (duty && await deleteDuty(duty)) setDutyModal(null); }} className="inline-flex items-center gap-1.5 rounded-xl px-2 py-2.5 text-xs font-semibold text-rose-600 hover:bg-rose-50"><Icon name="trash" size={14} />Remove duty</button> : <span />}
+            <div className="flex gap-2"><button type="button" onClick={() => setDutyModal(null)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button type="submit" className="rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d]">{dutyModal.id ? "Save changes" : dutyModal.repeatWeekly ? "Assign recurring duties" : "Assign duty"}</button></div>
           </div>
         </form>
       </Modal>}
 
       {staffModal && <Modal title={staffModal === "new" ? "Add staff member" : "Edit staff member"} onClose={() => setStaffModal(null)}>
         <form key={staffModal === "new" ? "new" : staffModal.id} onSubmit={saveStaff} className="space-y-4">
-          <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Full name</span><input name="fullName" required maxLength={120} autoComplete="name" defaultValue={staffModal === "new" ? "" : staffModal.name} placeholder="e.g. Alex Morgan" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
-          {staffModal === "new" && <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Staff ID</span><input name="staffId" required maxLength={50} placeholder="e.g. S001" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>}
-          <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Email</span><input name="email" required type="email" autoComplete="email" defaultValue={staffModal === "new" ? "" : staffModal.email} placeholder="alex@company.com" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
+          <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Full name</span><input name="fullName" required maxLength={100} autoComplete="name" defaultValue={staffModal === "new" ? "" : staffModal.name} placeholder="e.g. Alex Morgan" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
+          {staffModal === "new" && <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Staff ID</span><input name="staffId" required maxLength={10} placeholder="e.g. STF001" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>}
+          <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Email</span><input name="email" required type="email" autoComplete="email" maxLength={25} defaultValue={staffModal === "new" ? "" : staffModal.email} placeholder="alex@company.com" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
           {staffModal === "new" && <>
-            <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Password</span><input name="password" required type="password" minLength={8} autoComplete="new-password" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
-            <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Confirm password</span><input name="confirmPassword" required type="password" minLength={8} autoComplete="new-password" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
+            <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Password</span><input name="password" required type="password" minLength={8} maxLength={72} autoComplete="new-password" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
+            <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Confirm password</span><input name="confirmPassword" required type="password" minLength={8} maxLength={72} autoComplete="new-password" className="w-full rounded-xl border border-slate-200 px-3.5 py-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
           </>}
           {staffFormMessage && <p role="alert" className="rounded-xl border border-rose-100 bg-rose-50 px-3.5 py-3 text-xs text-rose-700">{staffFormMessage}</p>}
           <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" disabled={isSavingStaff} onClick={() => setStaffModal(null)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60">Cancel</button><button type="submit" disabled={isSavingStaff} className="rounded-xl bg-[#172543] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#24375d] disabled:cursor-not-allowed disabled:opacity-60">{isSavingStaff ? staffModal === "new" ? "Creating account..." : "Saving changes..." : staffModal === "new" ? "Create staff account" : "Save changes"}</button></div>
@@ -932,7 +1033,7 @@ function EmptyState({ title, text, action, onClick }: { title: string; text: str
   return <div className="py-10 text-center"><span className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-slate-100 text-slate-400"><Icon name="calendar" size={18} /></span><p className="mt-3 text-sm font-semibold text-slate-700">{title}</p><p className="mt-1 text-xs text-slate-500">{text}</p><button onClick={onClick} className="mt-4 rounded-lg bg-[#172543] px-3.5 py-2 text-[11px] font-semibold text-white hover:bg-[#24375d]">{action}</button></div>;
 }
 
-function CalendarView({ mode, selectedDate, today, duties, staff, taskCount, onSelect, onAdd, onEdit }: { mode: "Day" | "Week" | "Month"; selectedDate: string; today: string; duties: Duty[]; staff: Staff[]; taskCount: number; onSelect: (date: string) => void; onAdd: (date: string) => void; onEdit: (duty: Duty) => void }) {
+function CalendarView({ mode, selectedDate, today, duties, staff, onSelect, onAdd, onEdit }: { mode: "Day" | "Week" | "Month"; selectedDate: string; today: string; duties: Duty[]; staff: Staff[]; onSelect: (date: string) => void; onAdd: (date: string) => void; onEdit: (duty: Duty) => void }) {
   const selected = new Date(`${selectedDate}T12:00:00`);
   const start = new Date(selected);
   if (mode === "Week") start.setDate(selected.getDate() - selected.getDay() + 1);
@@ -946,7 +1047,7 @@ function CalendarView({ mode, selectedDate, today, duties, staff, taskCount, onS
   if (mode === "Day") {
     const duty = duties.find((item) => item.date === selectedDate);
     const assigned = duty?.staffIds.map((id) => staff.find((person) => person.id === id)).filter((person): person is Staff => Boolean(person)) ?? [];
-    return <div><div className="mb-5 rounded-xl bg-[#f7f8fc] p-4"><p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Selected day</p><p className="mt-1 text-lg font-bold text-[#17233c]">{formatDate(selectedDate, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</p></div>{duty ? <div className="rounded-xl border border-indigo-100 bg-indigo-50/50 p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-bold text-slate-800">Office cleaning duty</p><p className="mt-1 text-xs text-slate-500">{assigned.length} team members assigned</p></div><button onClick={() => onEdit(duty)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] font-semibold text-slate-600 hover:text-indigo-700"><Icon name="edit" size={13} />Edit assignment</button></div><div className="mt-4 flex flex-wrap gap-2">{assigned.map((person) => <span key={person.id} className="inline-flex items-center gap-2 rounded-full bg-white py-1 pl-1 pr-3 text-[11px] font-semibold text-slate-700"><Avatar name={person.name} size="h-6 w-6" />{person.name}</span>)}</div></div> : <EmptyState title="Nothing scheduled" text="Assign at least two active staff members to this date." action="Assign cleaning team" onClick={() => onAdd(selectedDate)} />}</div>;
+    return <div><div className="mb-5 rounded-xl bg-[#f7f8fc] p-4"><p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Selected day</p><p className="mt-1 text-lg font-bold text-[#17233c]">{formatDate(selectedDate, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</p></div>{duty ? <div className="rounded-xl border border-indigo-100 bg-indigo-50/50 p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-bold text-slate-800">Office cleaning duty</p><p className="mt-1 text-xs text-slate-500">{assigned.length} team members assigned · {duty.taskIds.length} tasks</p></div><button onClick={() => onEdit(duty)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] font-semibold text-slate-600 hover:text-indigo-700"><Icon name="edit" size={13} />Edit assignment</button></div><div className="mt-4 flex flex-wrap gap-2">{assigned.map((person) => <span key={person.id} className="inline-flex items-center gap-2 rounded-full bg-white py-1 pl-1 pr-3 text-[11px] font-semibold text-slate-700"><Avatar name={person.name} size="h-6 w-6" />{person.name}</span>)}</div></div> : <EmptyState title="Nothing scheduled" text="Assign at least two active staff members to this date." action="Assign cleaning team" onClick={() => onAdd(selectedDate)} />}</div>;
   }
   const weekDays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   return <div className={mode === "Month" ? "grid grid-cols-7 border-l border-t border-slate-100" : "grid grid-cols-1 gap-2 md:grid-cols-7"}>
@@ -957,12 +1058,12 @@ function CalendarView({ mode, selectedDate, today, duties, staff, taskCount, onS
       const assigned = duty?.staffIds.map((id) => staff.find((person) => person.id === id)).filter((person): person is Staff => Boolean(person)) ?? [];
       return <div key={date} className={`${mode === "Month" ? "min-h-[112px] border-b border-r border-slate-100 p-2" : "min-h-[190px] rounded-xl border border-slate-100 p-3"} ${isOutside ? "bg-slate-50/70" : "bg-white"} ${date === selectedDate ? "ring-2 ring-inset ring-indigo-300" : ""} ${mode === "Week" ? "hover:border-indigo-200 hover:bg-indigo-50/30" : ""}`}>
         <div className="flex items-center justify-between"><button onClick={(event) => { event.stopPropagation(); onSelect(date); }} className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold ${date === today ? "bg-[#172543] text-white" : isOutside ? "text-slate-300" : "text-slate-600"}`}>{new Date(`${date}T12:00:00`).getDate()}</button>{mode === "Week" && <button onClick={(event) => { event.stopPropagation(); onAdd(date); }} aria-label={`Add duty on ${date}`} className="flex h-6 w-6 items-center justify-center rounded-md text-slate-300 hover:bg-indigo-100 hover:text-indigo-700"><Icon name="plus" size={14} /></button>}</div>
-        {duty ? <button onClick={(event) => { event.stopPropagation(); onEdit(duty); }} className={`mt-2 w-full rounded-lg bg-[#eff5e7] p-2 text-left hover:bg-[#e6f1d8] ${mode === "Month" ? "p-1.5" : ""}`}><span className="block text-[9px] font-bold text-[#527337]">Cleaning crew</span><span className="mt-1 block truncate text-[10px] font-semibold text-slate-700">{assigned.map((person) => person.name.split(" ")[0]).join(", ")}</span>{mode === "Week" && <span className="mt-1 block text-[9px] text-slate-500">{duty.completedTaskIds.length}/{taskCount} tasks done</span>}</button> : mode === "Week" && <button onClick={(event) => { event.stopPropagation(); onAdd(date); }} className="mt-3 text-[10px] text-slate-300 hover:text-indigo-600">+ Add duty</button>}
+        {duty ? <button onClick={(event) => { event.stopPropagation(); onEdit(duty); }} className={`mt-2 w-full rounded-lg bg-[#eff5e7] p-2 text-left hover:bg-[#e6f1d8] ${mode === "Month" ? "p-1.5" : ""}`}><span className="block text-[9px] font-bold text-[#527337]">Cleaning crew</span><span className="mt-1 block truncate text-[10px] font-semibold text-slate-700">{assigned.map((person) => person.name.split(" ")[0]).join(", ")}</span>{mode === "Week" && <span className="mt-1 block text-[9px] text-slate-500">{duty.completedTaskIds.filter((id) => duty.taskIds.includes(id)).length}/{duty.taskIds.length} tasks done</span>}</button> : mode === "Week" && <button onClick={(event) => { event.stopPropagation(); onAdd(date); }} className="mt-3 text-[10px] text-slate-300 hover:text-indigo-600">+ Add duty</button>}
       </div>;
     })}
   </div>;
 }
 
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
-  return <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#101b36]/45 px-4 py-6 backdrop-blur-sm" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section role="dialog" aria-modal="true" aria-labelledby="modal-title" className="max-h-full w-full max-w-md overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl sm:p-6"><div className="mb-5 flex items-center justify-between"><h2 id="modal-title" className="text-base font-bold text-[#17233c]">{title}</h2><button onClick={onClose} aria-label="Close dialog" className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><Icon name="close" size={17} /></button></div>{children}</section></div>;
+function Modal({ title, onClose, children, className = "max-w-md" }: { title: string; onClose: () => void; children: ReactNode; className?: string }) {
+  return <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#101b36]/45 px-4 py-6 backdrop-blur-sm" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section role="dialog" aria-modal="true" aria-labelledby="modal-title" className={`max-h-full w-full ${className} overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl sm:p-6`}><div className="mb-5 flex items-center justify-between"><h2 id="modal-title" className="text-base font-bold text-[#17233c]">{title}</h2><button type="button" onClick={onClose} aria-label="Close dialog" className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><Icon name="close" size={17} /></button></div>{children}</section></div>;
 }

@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
-import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { signIn } from "./actions";
 
 export default function LoginForm() {
   const router = useRouter();
@@ -20,14 +20,13 @@ export default function LoginForm() {
     const password = String(formData.get("password") ?? "");
 
     try {
-      const supabase = createSupabaseBrowserClient();
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) {
-        setErrorMessage(error.message);
+      const result = await signIn(email, password);
+      if (!result.success) {
+        setErrorMessage(result.message);
         return;
       }
 
-      router.replace("/admin");
+      router.replace(result.destination);
       router.refresh();
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Unable to sign in.");
@@ -45,6 +44,7 @@ export default function LoginForm() {
           name="email"
           type="email"
           autoComplete="email"
+          maxLength={25}
           placeholder="you@company.com"
           required
           className="h-12 w-full rounded-xl border border-[#dfe4ec] bg-white px-4 text-sm text-[#101b36] outline-none transition placeholder:text-slate-400 hover:border-[#cbd4e2] focus:border-[#90b95d] focus:ring-4 focus:ring-[#b8f26b]/20"
@@ -58,6 +58,7 @@ export default function LoginForm() {
             name="password"
             type={showPassword ? "text" : "password"}
             autoComplete="current-password"
+            maxLength={128}
             placeholder="Enter your password"
             required
             className="h-12 w-full rounded-xl border border-[#dfe4ec] bg-white px-4 pr-12 text-sm text-[#101b36] outline-none transition placeholder:text-slate-400 hover:border-[#cbd4e2] focus:border-[#90b95d] focus:ring-4 focus:ring-[#b8f26b]/20"

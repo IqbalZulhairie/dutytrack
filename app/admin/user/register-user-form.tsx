@@ -22,27 +22,27 @@ export default function RegisterUserForm() {
     <form ref={formRef} action={formAction} className="grid gap-x-5 gap-y-5 sm:grid-cols-2">
       <div>
         <label htmlFor="full-name" className="mb-2 block text-sm font-medium text-slate-200">Full name</label>
-        <input id="full-name" name="fullName" type="text" autoComplete="name" maxLength={120} placeholder="e.g. Alex Morgan" required className={inputClassName()} />
+        <input id="full-name" name="fullName" type="text" autoComplete="name" maxLength={100} placeholder="e.g. Alex Morgan" required className={inputClassName()} />
       </div>
 
       <div>
         <label htmlFor="staff-id" className="mb-2 block text-sm font-medium text-slate-200">Staff ID</label>
-        <input id="staff-id" name="staffId" type="text" maxLength={50} placeholder="e.g. S001" required className={inputClassName()} />
+        <input id="staff-id" name="staffId" type="text" maxLength={10} placeholder="e.g. S001" required className={inputClassName()} />
       </div>
 
       <div>
         <label htmlFor="email" className="mb-2 block text-sm font-medium text-slate-200">Email</label>
-        <input id="email" name="email" type="email" autoComplete="email" placeholder="alex@company.com" required className={inputClassName()} />
+        <input id="email" name="email" type="email" autoComplete="email" maxLength={25} placeholder="alex@company.com" required className={inputClassName()} />
       </div>
 
       <div>
         <label htmlFor="password" className="mb-2 block text-sm font-medium text-slate-200">Password</label>
-        <input id="password" name="password" type="password" autoComplete="new-password" minLength={8} required className={inputClassName()} />
+        <input id="password" name="password" type="password" autoComplete="new-password" minLength={8} maxLength={72} required className={inputClassName()} />
       </div>
 
       <div>
         <label htmlFor="confirm-password" className="mb-2 block text-sm font-medium text-slate-200">Confirm password</label>
-        <input id="confirm-password" name="confirmPassword" type="password" autoComplete="new-password" minLength={8} required className={inputClassName()} />
+        <input id="confirm-password" name="confirmPassword" type="password" autoComplete="new-password" minLength={8} maxLength={72} required className={inputClassName()} />
       </div>
 
       <div className="border-t border-slate-800 pt-5 sm:col-span-2">

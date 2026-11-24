@@ -1,7 +1,8 @@
 "use server";
 
-import { createSupabaseAdminClient } from "@/lib/supabase/admin";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import { getCurrentUser, hashPassword } from "@/lib/auth";
+import { getDb } from "@/lib/db";
 
 export type RegisterUserState = {
   status: "idle" | "success" | "error";
@@ -21,41 +22,11 @@ export async function registerUser(
 ): Promise<RegisterUserState> {
   void _previousState;
 
-  const sessionClient = await createSupabaseServerClient();
-  const { data: authData, error: authError } = await sessionClient.auth.getUser();
-
-  if (authError || !authData.user) {
+  const currentUser = await getCurrentUser();
+  if (!currentUser) {
     return { status: "error", message: "Sign in to register users." };
   }
-
-  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    return { status: "error", message: "Server setup is incomplete: SUPABASE_SERVICE_ROLE_KEY is missing." };
-  }
-
-  const adminClient = createSupabaseAdminClient();
-  const { data: currentProfile, error: currentProfileError } = await adminClient
-    .from("profiles")
-    .select("role_id")
-    .eq("id", authData.user.id)
-    .maybeSingle();
-
-  if (currentProfileError) {
-    return { status: "error", message: `Could not verify your account permissions: ${currentProfileError.message}` };
-  }
-  if (!currentProfile) {
-    return { status: "error", message: "Your account profile could not be verified." };
-  }
-
-  const { data: currentRole, error: currentRoleError } = await adminClient
-    .from("roles")
-    .select("role_name")
-    .eq("id", currentProfile.role_id)
-    .maybeSingle();
-
-  if (currentRoleError) {
-    return { status: "error", message: `Could not verify your account role: ${currentRoleError.message}` };
-  }
-  if (!currentRole || !["admin", "administrator"].includes(currentRole.role_name.toLowerCase())) {
+  if (currentUser.role !== "admin") {
     return { status: "error", message: "Only administrators can register staff accounts." };
   }
 
@@ -65,77 +36,49 @@ export async function registerUser(
   const password = readField(formData, "password", false);
   const confirmPassword = readField(formData, "confirmPassword", false);
 
-  if (!fullName || fullName.length > 120) {
-    return { status: "error", message: "Enter a name between 1 and 120 characters." };
+  if (!fullName || fullName.length > 100) {
+    return { status: "error", message: "Enter a name between 1 and 100 characters." };
   }
-  if (!staffId || staffId.length > 50) {
-    return { status: "error", message: "Enter a staff ID between 1 and 50 characters." };
+  if (!staffId || staffId.length > 10) {
+    return { status: "error", message: "Enter a staff ID between 1 and 10 characters." };
   }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 25) {
     return { status: "error", message: "Enter a valid email address." };
   }
-  if (password.length < 8) {
-    return { status: "error", message: "Password must contain at least 8 characters." };
+  if (password.length < 8 || password.length > 128 || Buffer.byteLength(password, "utf8") > 72) {
+    return { status: "error", message: "Password must contain between 8 and 72 UTF-8 bytes." };
   }
   if (password !== confirmPassword) {
     return { status: "error", message: "The passwords do not match." };
   }
 
-  const { data: selectedRole, error: selectedRoleError } = await adminClient
-    .from("roles")
-    .select("id, role_name")
-    .ilike("role_name", "staff")
-    .maybeSingle();
+  try {
+    const passwordHash = await hashPassword(password);
+    const db = getDb();
+    const [roleRows] = await db.execute<RowDataPacket[]>(
+      "SELECT id FROM roles WHERE LOWER(role_name) = 'staff' LIMIT 1",
+    );
+    if (!roleRows[0]) return { status: "error", message: "The Staff role is missing from the roles table." };
 
-  if (selectedRoleError) {
-    return { status: "error", message: `Could not verify the staff role: ${selectedRoleError.message}` };
-  }
-  if (!selectedRole) {
-    return { status: "error", message: "The staff role is not configured. Contact your administrator." };
-  }
-  if (selectedRole.role_name.toLowerCase() !== "staff") {
-    return { status: "error", message: "Only staff accounts can be registered through this form." };
-  }
-
-  const { data: createdAuthUser, error: createUserError } = await adminClient.auth.admin.createUser({
-    email,
-    password,
-    email_confirm: true,
-    user_metadata: { full_name: fullName, staff_id: staffId },
-  });
-
-  if (createUserError) {
-    return { status: "error", message: `Could not create the authentication account: ${createUserError.message}` };
-  }
-  if (!createdAuthUser.user) {
-    return { status: "error", message: "Supabase did not return the created authentication account." };
-  }
-
-  const { error: insertProfileError } = await adminClient.from("profiles").insert({
-    id: createdAuthUser.user.id,
-    staff_id: staffId,
-    full_name: fullName,
-    email,
-    role_id: selectedRole.id,
-  });
-
-  if (insertProfileError) {
-    const { error: rollbackError } = await adminClient.auth.admin.deleteUser(createdAuthUser.user.id);
-    if (rollbackError) {
-      return {
-        status: "error",
-        message: `Profile insertion failed (${insertProfileError.message}) and the Auth account could not be rolled back (${rollbackError.message}).`,
-      };
+    const [result] = await db.execute<ResultSetHeader>(
+      `INSERT INTO profiles (full_name, staff_id, email, password, role_id, is_active)
+       VALUES (?, ?, ?, ?, ?, 1)`,
+      [fullName, staffId, email, passwordHash, roleRows[0].id],
+    );
+    if (result.affectedRows !== 1) {
+      return { status: "error", message: "The staff profile was not created." };
     }
-    return {
-      status: "error",
-      message: `Profile insertion failed; the new Auth account was removed. ${insertProfileError.message}`,
-    };
-  }
 
-  return {
-    status: "success",
-    message: `${fullName} was registered successfully.`,
-    createdUser: { id: createdAuthUser.user.id, fullName, staffId, email },
-  };
+    return {
+      status: "success",
+      message: `${fullName} was registered successfully.`,
+      createdUser: { id: String(result.insertId), fullName, staffId, email },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "The database request failed.";
+    if (error && typeof error === "object" && "code" in error && error.code === "ER_DUP_ENTRY") {
+      return { status: "error", message: "A user with that email address or staff ID already exists." };
+    }
+    return { status: "error", message: `Could not create the staff account: ${message}` };
+  }
 }

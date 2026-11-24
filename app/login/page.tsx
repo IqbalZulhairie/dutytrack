@@ -55,10 +55,10 @@ export default function LoginPage() {
               <LoginForm />
 
               <p className="mt-8 text-center text-xs text-slate-500">
-                Need access?{" "}
-                <a href="mailto:support@dutytrack.app" className="font-bold text-[#101b36] underline decoration-[#b8f26b] decoration-2 underline-offset-4 transition hover:text-[#66873a]">
-                  Contact your administrator
-                </a>
+                Initial setup?{" "}
+                <Link href="/setup" className="font-bold text-[#101b36] underline decoration-[#b8f26b] decoration-2 underline-offset-4 transition hover:text-[#66873a]">
+                  Create the administrator account
+                </Link>
               </p>
             </div>
           </section>

@@ -5,6 +5,13 @@ export type TestEmailState = {
   message: string;
 };
 
+function isValidSender(value: string) {
+  const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (emailPattern.test(value)) return true;
+  const displayNameAddress = value.match(/^(.+?)\s*<([^<>]+)>$/);
+  return Boolean(displayNameAddress?.[1].trim() && emailPattern.test(displayNameAddress[2]));
+}
+
 export async function sendTestEmail(
   _previousState: TestEmailState,
   formData: FormData,
@@ -29,8 +36,8 @@ export async function sendTestEmail(
   if (!recipient || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) {
     return { status: "error", message: "Set a valid RESEND_TEST_RECIPIENT email address on the server." };
   }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(from)) {
-    return { status: "error", message: "RESEND_FROM_EMAIL must be a valid email address." };
+  if (!isValidSender(from)) {
+    return { status: "error", message: "RESEND_FROM_EMAIL must be a valid Resend sender address." };
   }
 
   let response: Response;
