@@ -9,7 +9,6 @@ loadEnvConfig(projectRoot);
 
 const timezone = process.env.REMINDER_TIMEZONE || "Asia/Kuala_Lumpur";
 const isDryRun = process.argv.includes("--dry-run");
-const isScheduledRun = process.argv.includes("--scheduled");
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function isValidSender(value) {
@@ -33,26 +32,6 @@ function getLocalDateTime(date = new Date()) {
     date: `${values.year}-${values.month}-${values.day}`,
     minutesAfterMidnight: Number(values.hour) * 60 + Number(values.minute),
   };
-}
-
-function readIdArray(value, field) {
-  let parsed = value;
-  if (typeof parsed === "string") {
-    try {
-      parsed = JSON.parse(parsed);
-    } catch {
-      throw new Error(`Invalid ${field} JSON in the database.`);
-    }
-  }
-  if (!Array.isArray(parsed)) throw new Error(`Invalid ${field} data in the database.`);
-
-  return parsed.map((item) => {
-    const id = typeof item === "number" ? String(item) : item;
-    if (typeof id !== "string" || !/^[1-9]\d*$/.test(id) || !Number.isSafeInteger(Number(id))) {
-      throw new Error(`Invalid ${field} ID in the database.`);
-    }
-    return id;
-  });
 }
 
 function escapeHtml(value) {
@@ -93,9 +72,16 @@ function getDatabaseConfig() {
   };
 }
 
-function getReminderEmail({ recipientName, dutyDate, tasks }) {
+function getReminderEmail({ recipientName, dutyDate, tasks, assignedStaff = [] }) {
   const safeName = escapeHtml(recipientName);
   const formattedDate = formatDutyDate(dutyDate);
+  const staffNames = assignedStaff.map((staff) => typeof staff === "string" ? staff : staff.full_name);
+  const staffList = staffNames.length
+    ? staffNames.map((name) => `<li>${escapeHtml(name)}</li>`).join("")
+    : "<li>No staff are assigned.</li>";
+  const textStaff = staffNames.length
+    ? staffNames.map((name) => `- ${name}`).join("\n")
+    : "- No staff are assigned.";
   const taskList = tasks.length
     ? tasks.map((task) => `<li>${escapeHtml(task.task_name)}${task.description ? ` — ${escapeHtml(task.description)}` : ""}</li>`).join("")
     : "<li>No active cleaning tasks are assigned.</li>";
@@ -105,8 +91,8 @@ function getReminderEmail({ recipientName, dutyDate, tasks }) {
 
   return {
     subject: `Cleaning duty reminder - ${dutyDate}`,
-    html: `<p>Hi ${safeName},</p><p>This is a reminder that you are assigned to the cleaning duty today, ${escapeHtml(formattedDate)}.</p><p>Today's cleaning tasks:</p><ul>${taskList}</ul><p>Thank you,<br>Duty Track</p>`,
-    text: `Hi ${recipientName},\n\nThis is a reminder that you are assigned to the cleaning duty today, ${formattedDate}.\n\nToday's cleaning tasks:\n${textTasks}\n\nThank you,\nDuty Track`,
+    html: `<p>Hi ${safeName},</p><p>This is a reminder that you are assigned to the cleaning duty today, ${escapeHtml(formattedDate)}.</p><p>Assigned staff:</p><ul>${staffList}</ul><p>Today's cleaning tasks:</p><ul>${taskList}</ul><p>Thank you,<br>Duty Track</p>`,
+    text: `Hi ${recipientName},\n\nThis is a reminder that you are assigned to the cleaning duty today, ${formattedDate}.\n\nAssigned staff:\n${textStaff}\n\nToday's cleaning tasks:\n${textTasks}\n\nThank you,\nDuty Track`,
   };
 }
 
@@ -147,11 +133,12 @@ async function updateDelivery(connection, dutyId, staffId, status, errorMessage 
   );
 }
 
-async function sendReminder({ apiKey, from, recipient, recipientId, duty, tasks }) {
+async function sendReminder({ apiKey, from, recipient, recipientId, duty, tasks, assignedStaff }) {
   const message = getReminderEmail({
     recipientName: recipient.full_name,
     dutyDate: duty.date,
     tasks,
+    assignedStaff,
   });
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
@@ -201,8 +188,7 @@ async function main() {
     const [, reminderHour, reminderMinute] = reminderTime.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
     const reminderMinutesAfterMidnight = Number(reminderHour) * 60 + Number(reminderMinute);
     const isBeforeReminderTime = dateTime.minutesAfterMidnight < reminderMinutesAfterMidnight;
-    const isOutsideScheduledMinute = isScheduledRun && dateTime.minutesAfterMidnight !== reminderMinutesAfterMidnight;
-    if (!isDryRun && (isScheduledRun ? isOutsideScheduledMinute : isBeforeReminderTime)) {
+    if (!isDryRun && isBeforeReminderTime) {
       console.info(`Not due now: reminders are scheduled for ${reminderTime} in ${timezone}.`);
       return;
     }
@@ -215,8 +201,8 @@ async function main() {
     }
 
     const [dutyRows] = await connection.execute(
-      `SELECT id, DATE_FORMAT(duty_date, '%Y-%m-%d') AS date, staff_ids, task_ids
-       FROM duties
+      `SELECT id, DATE_FORMAT(duty_date, '%Y-%m-%d') AS date
+       FROM duty_schedules
        WHERE duty_date = ?
        ORDER BY id`,
       [dateTime.date],
@@ -232,18 +218,40 @@ async function main() {
        INNER JOIN roles ON roles.id = profiles.role_id
        WHERE LOWER(roles.role_name) = 'staff' AND profiles.is_active = 1`,
     );
-    const [taskRows] = await connection.execute(
-      "SELECT id, task_name, description FROM cleaning_tasks WHERE is_active = 1 ORDER BY task_name",
+    const scheduleIds = dutyRows.map((row) => String(row.id));
+    const placeholders = scheduleIds.map(() => "?").join(", ");
+    const [assignmentRows] = await connection.execute(
+      `SELECT schedule_id, staff_id FROM duty_assignments WHERE schedule_id IN (${placeholders}) ORDER BY schedule_id, id`,
+      scheduleIds,
+    );
+    const [scheduleTaskRows] = await connection.execute(
+      `SELECT schedule_tasks.schedule_id, schedule_tasks.task_id, cleaning_tasks.task_name, cleaning_tasks.description
+       FROM schedule_tasks
+       INNER JOIN cleaning_tasks ON cleaning_tasks.id = schedule_tasks.task_id
+       WHERE schedule_tasks.schedule_id IN (${placeholders})
+         AND cleaning_tasks.is_active = 1
+       ORDER BY schedule_tasks.schedule_id, cleaning_tasks.task_name`,
+      scheduleIds,
     );
     const staffById = new Map(staffRows.map((staff) => [String(staff.id), staff]));
+    const staffIdsByDuty = new Map();
+    for (const assignment of assignmentRows) {
+      const dutyId = String(assignment.schedule_id);
+      staffIdsByDuty.set(dutyId, [...(staffIdsByDuty.get(dutyId) || []), String(assignment.staff_id)]);
+    }
+    const tasksByDuty = new Map();
+    for (const task of scheduleTaskRows) {
+      const dutyId = String(task.schedule_id);
+      tasksByDuty.set(dutyId, [...(tasksByDuty.get(dutyId) || []), task]);
+    }
 
     for (const row of dutyRows) {
       const dutyId = String(row.id);
-      const staffIds = readIdArray(row.staff_ids, "duty staff");
-      const assignedTaskIds = row.task_ids == null
-        ? new Set(taskRows.map((task) => String(task.id)))
-        : new Set(readIdArray(row.task_ids, "duty task"));
-      const tasks = taskRows.filter((task) => assignedTaskIds.has(String(task.id)));
+      const staffIds = [...new Set(staffIdsByDuty.get(dutyId) || [])];
+      const assignedStaff = staffIds
+        .map((staffId) => staffById.get(staffId))
+        .filter((staff) => Boolean(staff));
+      const tasks = tasksByDuty.get(dutyId) || [];
       const duty = { id: dutyId, date: row.date };
 
       for (const staffId of new Set(staffIds)) {
@@ -259,12 +267,14 @@ async function main() {
           continue;
         }
 
-        if (!await claimDelivery(connection, dutyId, staffId, duty.date)) {
-          skipped += 1;
-          continue;
-        }
-
+        let claimed = false;
         try {
+          claimed = await claimDelivery(connection, dutyId, staffId, duty.date);
+          if (!claimed) {
+            skipped += 1;
+            continue;
+          }
+
           await sendReminder({
             apiKey,
             from,
@@ -272,13 +282,21 @@ async function main() {
             recipientId: staffId,
             duty,
             tasks,
+            assignedStaff,
           });
           await updateDelivery(connection, dutyId, staffId, "sent");
           sent += 1;
         } catch (error) {
           failed += 1;
           const errorMessage = error instanceof Error ? error.message : "Unknown email delivery error.";
-          await updateDelivery(connection, dutyId, staffId, "failed", errorMessage.slice(0, 2000));
+          if (claimed) {
+            try {
+              await updateDelivery(connection, dutyId, staffId, "failed", errorMessage.slice(0, 2000));
+            } catch (updateError) {
+              const updateMessage = updateError instanceof Error ? updateError.message : "Unknown delivery status error.";
+              console.error(`Could not record failure for duty ${dutyId}, staff ${staffId}: ${updateMessage}`);
+            }
+          }
           console.error(`Reminder delivery failed for duty ${dutyId}, staff ${staffId}: ${errorMessage}`);
         }
       }

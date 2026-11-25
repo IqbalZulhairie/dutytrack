@@ -1,10 +1,11 @@
 "use server";
 
-import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { requireAdmin } from "@/lib/auth";
 import { getDb } from "@/lib/db";
 import { getDutyDates, getOneYearLater } from "@/lib/duty-schedule";
-import type { CleaningTask, Duty, Staff, Store } from "@/lib/types";
+import { updateDutyScheduleStatus } from "@/lib/duty-schedule-status";
+import type { CleaningTask, Staff, Store } from "@/lib/types";
 
 type StaffRow = RowDataPacket & {
   id: number | string;
@@ -24,33 +25,22 @@ type TaskRow = RowDataPacket & {
 type DutyRow = RowDataPacket & {
   id: number | string;
   date: string;
-  staff_ids: unknown;
-  task_ids: unknown;
-  completed_task_ids: unknown;
+};
+
+type DutyAssignmentRow = RowDataPacket & {
+  schedule_id: number | string;
+  staff_id: number | string;
+};
+
+type ScheduleTaskRow = RowDataPacket & {
+  schedule_id: number | string;
+  task_id: number | string;
+  status: "Pending" | "Completed";
 };
 
 type ReminderSettingRow = RowDataPacket & {
   reminder_time: string;
 };
-
-function readStringArray(value: unknown, field: string): string[] {
-  let parsed = value;
-  if (typeof parsed === "string") {
-    try {
-      parsed = JSON.parse(parsed);
-    } catch {
-      throw new Error(`The database contains invalid ${field} data.`);
-    }
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error(`The database contains invalid ${field} data.`);
-  }
-  return parsed.map((item) => {
-    if (typeof item === "string") return item;
-    if (typeof item === "number" && Number.isSafeInteger(item) && item > 0) return String(item);
-    throw new Error(`The database contains invalid ${field} data.`);
-  });
-}
 
 function mapStaff(row: StaffRow): Staff {
   return {
@@ -68,16 +58,6 @@ function mapTask(row: TaskRow): CleaningTask {
     label: row.task_name,
     description: row.description ?? "",
     active: Boolean(row.is_active),
-  };
-}
-
-function mapDuty(row: DutyRow, legacyTaskIds: string[] = []): Duty {
-  return {
-    id: String(row.id),
-    date: row.date,
-    staffIds: readStringArray(row.staff_ids, "duty staff"),
-    taskIds: row.task_ids == null ? legacyTaskIds : readStringArray(row.task_ids, "duty task"),
-    completedTaskIds: readStringArray(row.completed_task_ids, "completed task"),
   };
 }
 
@@ -110,10 +90,16 @@ function readProfileId(value: unknown) {
   return value;
 }
 
+async function removeSchedule(connection: PoolConnection, scheduleId: string) {
+  await connection.execute("DELETE FROM duty_assignments WHERE schedule_id = ?", [scheduleId]);
+  await connection.execute("DELETE FROM schedule_tasks WHERE schedule_id = ?", [scheduleId]);
+  return connection.execute("DELETE FROM duty_schedules WHERE id = ?", [scheduleId]);
+}
+
 export async function getDashboardData(): Promise<Store> {
   await requireAdmin();
   const db = getDb();
-  const [staffResult, taskResult, dutyResult, reminderResult] = await Promise.all([
+  const [staffResult, taskResult, dutyResult, assignmentResult, scheduleTaskResult, reminderResult] = await Promise.all([
     db.execute<StaffRow[]>(
       `SELECT profiles.id, profiles.full_name, profiles.staff_id, profiles.email, profiles.is_active
        FROM profiles
@@ -125,8 +111,20 @@ export async function getDashboardData(): Promise<Store> {
       "SELECT id, task_name, description, is_active FROM cleaning_tasks ORDER BY task_name",
     ),
     db.execute<DutyRow[]>(
-      `SELECT id, DATE_FORMAT(duty_date, '%Y-%m-%d') AS date, staff_ids, task_ids, completed_task_ids
-       FROM duties ORDER BY duty_date`,
+      `SELECT id, DATE_FORMAT(duty_date, '%Y-%m-%d') AS date
+       FROM duty_schedules ORDER BY duty_date, id`,
+    ),
+    db.execute<DutyAssignmentRow[]>(
+      `SELECT duty_assignments.schedule_id, duty_assignments.staff_id
+       FROM duty_assignments
+       INNER JOIN duty_schedules ON duty_schedules.id = duty_assignments.schedule_id
+       ORDER BY duty_assignments.schedule_id, duty_assignments.id`,
+    ),
+    db.execute<ScheduleTaskRow[]>(
+      `SELECT schedule_tasks.schedule_id, schedule_tasks.task_id, schedule_tasks.status
+       FROM schedule_tasks
+       INNER JOIN duty_schedules ON duty_schedules.id = schedule_tasks.schedule_id
+       ORDER BY schedule_tasks.schedule_id, schedule_tasks.id`,
     ),
     db.execute<ReminderSettingRow[]>(
       "SELECT TIME_FORMAT(reminder_time, '%H:%i') AS reminder_time FROM duty_reminder_settings WHERE id = 1",
@@ -138,13 +136,31 @@ export async function getDashboardData(): Promise<Store> {
     throw new Error("The daily reminder time is missing or invalid.");
   }
 
-  const legacyTaskIds = taskResult[0]
-    .filter((task) => Boolean(task.is_active))
-    .map((task) => String(task.id));
+  const staffIdsByDuty = new Map<string, string[]>();
+  for (const row of assignmentResult[0]) {
+    const dutyId = String(row.schedule_id);
+    staffIdsByDuty.set(dutyId, [...(staffIdsByDuty.get(dutyId) ?? []), String(row.staff_id)]);
+  }
+  const tasksByDuty = new Map<string, ScheduleTaskRow[]>();
+  for (const row of scheduleTaskResult[0]) {
+    const dutyId = String(row.schedule_id);
+    tasksByDuty.set(dutyId, [...(tasksByDuty.get(dutyId) ?? []), row]);
+  }
   return {
     staff: staffResult[0].map(mapStaff),
     tasks: taskResult[0].map(mapTask),
-    duties: dutyResult[0].map((row) => mapDuty(row, legacyTaskIds)),
+    duties: dutyResult[0].map((row) => {
+      const scheduleTasks = tasksByDuty.get(String(row.id)) ?? [];
+      return {
+        id: String(row.id),
+        date: row.date,
+        staffIds: staffIdsByDuty.get(String(row.id)) ?? [],
+        taskIds: scheduleTasks.map((task) => String(task.task_id)),
+        completedTaskIds: scheduleTasks
+          .filter((task) => task.status === "Completed")
+          .map((task) => String(task.task_id)),
+      };
+    }),
     reminderTime,
   };
 }
@@ -306,21 +322,29 @@ export async function toggleStaffStatus(input: {
     }
 
     if (!input.active) {
-      const [dutyRows] = await connection.execute<DutyRow[]>(
-        `SELECT id, DATE_FORMAT(duty_date, '%Y-%m-%d') AS date, staff_ids, completed_task_ids
-         FROM duties WHERE duty_date >= ? FOR UPDATE`,
+      const [assignmentRows] = await connection.execute<DutyAssignmentRow[]>(
+        `SELECT duty_assignments.schedule_id, duty_assignments.staff_id
+         FROM duty_assignments
+         INNER JOIN duty_schedules ON duty_schedules.id = duty_assignments.schedule_id
+         WHERE duty_schedules.duty_date >= ?
+         FOR UPDATE`,
         [input.today],
       );
-      for (const row of dutyRows) {
-        const duty = mapDuty(row);
-        const staffIds = duty.staffIds.filter((staffId) => staffId !== input.id);
+      const staffIdsByDuty = new Map<string, string[]>();
+      for (const row of assignmentRows) {
+        const scheduleId = String(row.schedule_id);
+        staffIdsByDuty.set(scheduleId, [...(staffIdsByDuty.get(scheduleId) ?? []), String(row.staff_id)]);
+      }
+      for (const [scheduleId, assignedStaffIds] of staffIdsByDuty) {
+        const staffIds = assignedStaffIds.filter((staffId) => staffId !== input.id);
+        if (staffIds.length === assignedStaffIds.length) continue;
         if (staffIds.length < 2) {
-          await connection.execute("DELETE FROM duties WHERE id = ?", [duty.id]);
-        } else if (staffIds.length !== duty.staffIds.length) {
-          await connection.execute("UPDATE duties SET staff_ids = ? WHERE id = ?", [
-            JSON.stringify(staffIds),
-            duty.id,
-          ]);
+          await removeSchedule(connection, scheduleId);
+        } else {
+          await connection.execute(
+            "DELETE FROM duty_assignments WHERE schedule_id = ? AND staff_id = ?",
+            [scheduleId, input.id],
+          );
         }
       }
     }
@@ -377,7 +401,7 @@ export async function saveDuty(input: {
   if (!Array.isArray(input.staffIds) || input.staffIds.some((id) => typeof id !== "string")) {
     throw new Error("Choose valid staff members.");
   }
-  const staffIds = [...new Set(input.staffIds)];
+  const staffIds = [...new Set(input.staffIds.map((id) => readProfileId(id)))];
   if (staffIds.length < 2) throw new Error("Select at least two active staff members.");
   if (!Array.isArray(input.taskIds) || input.taskIds.some((id) => typeof id !== "string")) {
     throw new Error("Choose valid cleaning tasks.");
@@ -412,66 +436,63 @@ export async function saveDuty(input: {
     const [activeTaskRows] = await connection.execute<TaskRow[]>(
       "SELECT id, task_name, description, is_active FROM cleaning_tasks WHERE is_active = 1 FOR UPDATE",
     );
-    const legacyTaskIds = activeTaskRows.map((task) => String(task.id));
-    if (taskIds.some((id) => !legacyTaskIds.includes(id))) {
+    const activeTaskIds = activeTaskRows.map((task) => String(task.id));
+    if (taskIds.some((id) => !activeTaskIds.includes(id))) {
       throw new Error("Choose only active cleaning tasks.");
     }
 
-    const datePlaceholders = dates.map(() => "?").join(", ");
-    const [dateRows] = await connection.execute<DutyRow[]>(
-      `SELECT id, DATE_FORMAT(duty_date, '%Y-%m-%d') AS date, staff_ids, task_ids, completed_task_ids
-       FROM duties WHERE duty_date IN (${datePlaceholders}) FOR UPDATE`,
-      dates,
-    );
-    const dutiesByDate = new Map(dateRows.map((row) => [row.date, mapDuty(row, legacyTaskIds)]));
-    let source: Duty | null = null;
+    let completedTaskIds: string[] = [];
     if (dutyId) {
       const [sourceRows] = await connection.execute<DutyRow[]>(
-        `SELECT id, DATE_FORMAT(duty_date, '%Y-%m-%d') AS date, staff_ids, task_ids, completed_task_ids
-         FROM duties WHERE id = ? FOR UPDATE`,
+        `SELECT id, DATE_FORMAT(duty_date, '%Y-%m-%d') AS date
+         FROM duty_schedules WHERE id = ? FOR UPDATE`,
         [dutyId],
       );
-      source = sourceRows[0] ? mapDuty(sourceRows[0], legacyTaskIds) : null;
-    }
-    if (dutyId && !source) throw new Error("The cleaning duty no longer exists.");
-
-    if (source) {
-      const date = dates[0];
-      const existing = dutiesByDate.get(date);
-      if (existing && existing.id !== source.id) {
-        const mergedStaff = [...new Set([...existing.staffIds, ...staffIds])];
-        const mergedTasks = [...new Set([...existing.taskIds, ...taskIds])];
-        const completedTaskIds = [...new Set([
-          ...existing.completedTaskIds,
-          ...source.completedTaskIds.filter((id) => mergedTasks.includes(id)),
-        ])].filter((id) => mergedTasks.includes(id));
+      if (!sourceRows[0]) throw new Error("The cleaning duty no longer exists.");
+      const [scheduleTaskRows] = await connection.execute<ScheduleTaskRow[]>(
+        "SELECT schedule_id, task_id, status FROM schedule_tasks WHERE schedule_id = ? FOR UPDATE",
+        [dutyId],
+      );
+      completedTaskIds = scheduleTaskRows
+        .filter((task) => task.status === "Completed")
+        .map((task) => String(task.task_id))
+        .filter((id) => taskIds.includes(id));
+      await connection.execute("UPDATE duty_schedules SET duty_date = ? WHERE id = ?", [dates[0], dutyId]);
+      await connection.execute("DELETE FROM duty_assignments WHERE schedule_id = ?", [dutyId]);
+      await connection.execute("DELETE FROM schedule_tasks WHERE schedule_id = ?", [dutyId]);
+      for (const staffId of staffIds) {
         await connection.execute(
-          "UPDATE duties SET staff_ids = ?, task_ids = ?, completed_task_ids = ? WHERE id = ?",
-          [JSON.stringify(mergedStaff), JSON.stringify(mergedTasks), JSON.stringify(completedTaskIds), existing.id],
-        );
-        await connection.execute("DELETE FROM duties WHERE id = ?", [source.id]);
-      } else {
-        const completedTaskIds = source.completedTaskIds.filter((id) => taskIds.includes(id));
-        await connection.execute(
-          "UPDATE duties SET duty_date = ?, staff_ids = ?, task_ids = ?, completed_task_ids = ? WHERE id = ?",
-          [date, JSON.stringify(staffIds), JSON.stringify(taskIds), JSON.stringify(completedTaskIds), source.id],
+          "INSERT INTO duty_assignments (schedule_id, staff_id) VALUES (?, ?)",
+          [dutyId, staffId],
         );
       }
+      for (const taskId of taskIds) {
+        await connection.execute(
+          "INSERT INTO schedule_tasks (schedule_id, task_id, status) VALUES (?, ?, ?)",
+          [dutyId, taskId, completedTaskIds.includes(taskId) ? "Completed" : "Pending"],
+        );
+      }
+      await updateDutyScheduleStatus(connection, dutyId);
     } else {
       for (const date of dates) {
-        const existing = dutiesByDate.get(date);
-        if (existing) {
-          const mergedStaff = [...new Set([...existing.staffIds, ...staffIds])];
-          const mergedTasks = [...new Set([...existing.taskIds, ...taskIds])];
-          const completedTaskIds = existing.completedTaskIds.filter((id) => mergedTasks.includes(id));
+        const [result] = await connection.execute<ResultSetHeader>(
+          "INSERT INTO duty_schedules (duty_date, status) VALUES (?, 'Scheduled')",
+          [date],
+        );
+        if (!Number.isSafeInteger(result.insertId) || result.insertId < 1) {
+          throw new Error("Could not retrieve the new duty schedule ID.");
+        }
+        const scheduleId = String(result.insertId);
+        for (const staffId of staffIds) {
           await connection.execute(
-            "UPDATE duties SET staff_ids = ?, task_ids = ?, completed_task_ids = ? WHERE id = ?",
-            [JSON.stringify(mergedStaff), JSON.stringify(mergedTasks), JSON.stringify(completedTaskIds), existing.id],
+            "INSERT INTO duty_assignments (schedule_id, staff_id) VALUES (?, ?)",
+            [scheduleId, staffId],
           );
-        } else {
+        }
+        for (const taskId of taskIds) {
           await connection.execute(
-            "INSERT INTO duties (duty_date, staff_ids, task_ids, completed_task_ids) VALUES (?, ?, ?, ?)",
-            [date, JSON.stringify(staffIds), JSON.stringify(taskIds), JSON.stringify([])],
+            "INSERT INTO schedule_tasks (schedule_id, task_id, status) VALUES (?, ?, 'Pending')",
+            [scheduleId, taskId],
           );
         }
       }
@@ -490,9 +511,19 @@ export async function saveDuty(input: {
 export async function deleteDuty(dutyId: string) {
   await requireAdmin();
   const id = readDutyId(dutyId);
-  const [result] = await getDb().execute("DELETE FROM duties WHERE id = ?", [id]);
-  if (!("affectedRows" in result) || result.affectedRows !== 1) {
-    throw new Error("The cleaning duty no longer exists.");
+  const connection = await getDb().getConnection();
+  try {
+    await connection.beginTransaction();
+    const [result] = await removeSchedule(connection, id);
+    if (!("affectedRows" in result) || result.affectedRows !== 1) {
+      throw new Error("The cleaning duty no longer exists.");
+    }
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
   }
 }
 
@@ -509,22 +540,23 @@ export async function toggleDutyTask(dutyId: string, taskId: string) {
     );
     if (!taskRows[0]) throw new Error("The cleaning task is no longer active.");
     const [rows] = await connection.execute<DutyRow[]>(
-      `SELECT id, DATE_FORMAT(duty_date, '%Y-%m-%d') AS date, staff_ids, task_ids, completed_task_ids
-       FROM duties WHERE id = ? FOR UPDATE`,
+      `SELECT id, DATE_FORMAT(duty_date, '%Y-%m-%d') AS date
+       FROM duty_schedules WHERE id = ? FOR UPDATE`,
       [dutyKey],
     );
     if (!rows[0]) throw new Error("The cleaning duty no longer exists.");
-    const duty = mapDuty(rows[0]);
-    if (rows[0].task_ids != null && !duty.taskIds.includes(id)) {
+    const [scheduleTaskRows] = await connection.execute<ScheduleTaskRow[]>(
+      "SELECT schedule_id, task_id, status FROM schedule_tasks WHERE schedule_id = ? AND task_id = ? FOR UPDATE",
+      [dutyKey, id],
+    );
+    if (!scheduleTaskRows[0]) {
       throw new Error("The cleaning task is not assigned to this duty.");
     }
-    const completedTaskIds = duty.completedTaskIds.includes(id)
-      ? duty.completedTaskIds.filter((completedId) => completedId !== id)
-      : [...duty.completedTaskIds, id];
     await connection.execute(
-      "UPDATE duties SET completed_task_ids = ? WHERE id = ?",
-      [JSON.stringify(completedTaskIds), dutyKey],
+      "UPDATE schedule_tasks SET status = ? WHERE schedule_id = ? AND task_id = ?",
+      [scheduleTaskRows[0].status === "Completed" ? "Pending" : "Completed", dutyKey, id],
     );
+    await updateDutyScheduleStatus(connection, dutyKey);
     await connection.commit();
   } catch (error) {
     await connection.rollback();

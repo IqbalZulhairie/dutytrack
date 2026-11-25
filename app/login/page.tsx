@@ -35,7 +35,7 @@ export default function LoginPage() {
 
             <div className="relative flex items-center gap-3 border-t border-white/10 pt-6 text-xs text-slate-400">
               <span className="h-2 w-2 rounded-full bg-[#b8f26b] shadow-[0_0_12px_rgba(184,242,107,.65)]" />
-              Workspace services operational
+              Keep Our Office Clean & Cozy
             </div>
           </section>
 
@@ -53,13 +53,6 @@ export default function LoginPage() {
               </p>
 
               <LoginForm />
-
-              <p className="mt-8 text-center text-xs text-slate-500">
-                Initial setup?{" "}
-                <Link href="/setup" className="font-bold text-[#101b36] underline decoration-[#b8f26b] decoration-2 underline-offset-4 transition hover:text-[#66873a]">
-                  Create the administrator account
-                </Link>
-              </p>
             </div>
           </section>
         </div>

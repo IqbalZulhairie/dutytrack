@@ -3,34 +3,20 @@
 import type { RowDataPacket } from "mysql2/promise";
 import { requireUser } from "@/lib/auth";
 import { getDb } from "@/lib/db";
+import { updateDutyScheduleStatus } from "@/lib/duty-schedule-status";
 
 type DutyRow = RowDataPacket & {
-  staff_ids: unknown;
-  task_ids: unknown;
-  completed_task_ids: unknown;
+  id: number | string;
+};
+
+type ScheduleTaskRow = RowDataPacket & {
+  task_id: number | string;
+  status: "Pending" | "Completed";
 };
 
 type TaskRow = RowDataPacket & {
   id: number | string;
 };
-
-function readStringArray(value: unknown, field: string): string[] {
-  let parsed = value;
-  if (typeof parsed === "string") {
-    try {
-      parsed = JSON.parse(parsed);
-    } catch {
-      throw new Error(`The database contains invalid ${field} data.`);
-    }
-  }
-  if (!Array.isArray(parsed)) throw new Error(`The database contains invalid ${field} data.`);
-
-  return parsed.map((item) => {
-    if (typeof item === "string") return item;
-    if (typeof item === "number" && Number.isSafeInteger(item) && item > 0) return String(item);
-    throw new Error(`The database contains invalid ${field} data.`);
-  });
-}
 
 function readDutyId(value: unknown): string {
   const dutyId = typeof value === "number" ? String(value) : value;
@@ -66,32 +52,40 @@ export async function toggleMyDutyTask(dutyId: string, taskId: string): Promise<
     if (!taskRows[0]) throw new Error("The cleaning task is no longer active.");
 
     const [dutyRows] = await connection.execute<DutyRow[]>(
-      `SELECT staff_ids, task_ids, completed_task_ids
-       FROM duties
+      `SELECT id
+       FROM duty_schedules
        WHERE id = ? AND duty_date = CURDATE()
        FOR UPDATE`,
       [dutyKey],
     );
-    const duty = dutyRows[0];
-    if (!duty) throw new Error("No cleaning duty is assigned for today.");
-    if (!readStringArray(duty.staff_ids, "duty staff").includes(user.id)) {
+    if (!dutyRows[0]) throw new Error("No cleaning duty is assigned for today.");
+    const [assignmentRows] = await connection.execute<RowDataPacket[]>(
+      "SELECT id FROM duty_assignments WHERE schedule_id = ? AND staff_id = ? LIMIT 1",
+      [dutyKey, user.id],
+    );
+    if (!assignmentRows[0]) {
       throw new Error("You are not assigned to this cleaning duty.");
     }
-    if (duty.task_ids != null && !readStringArray(duty.task_ids, "duty task").includes(taskKey)) {
+    const [scheduleTaskRows] = await connection.execute<ScheduleTaskRow[]>(
+      "SELECT task_id, status FROM schedule_tasks WHERE schedule_id = ? AND task_id = ? FOR UPDATE",
+      [dutyKey, taskKey],
+    );
+    if (!scheduleTaskRows[0]) {
       throw new Error("The cleaning task is not assigned to this duty.");
     }
 
-    const completedTaskIds = readStringArray(duty.completed_task_ids, "completed task");
-    const updatedTaskIds = completedTaskIds.includes(taskKey)
-      ? completedTaskIds.filter((completedId) => completedId !== taskKey)
-      : [...completedTaskIds, taskKey];
     await connection.execute(
-      "UPDATE duties SET completed_task_ids = ? WHERE id = ?",
-      [JSON.stringify(updatedTaskIds), dutyKey],
+      "UPDATE schedule_tasks SET status = ? WHERE schedule_id = ? AND task_id = ?",
+      [scheduleTaskRows[0].status === "Completed" ? "Pending" : "Completed", dutyKey, taskKey],
     );
+    const [completedRows] = await connection.execute<ScheduleTaskRow[]>(
+      "SELECT task_id, status FROM schedule_tasks WHERE schedule_id = ? AND status = 'Completed'",
+      [dutyKey],
+    );
+    await updateDutyScheduleStatus(connection, dutyKey);
     await connection.commit();
     transactionStarted = false;
-    return updatedTaskIds;
+    return completedRows.map((row) => String(row.task_id));
   } catch (error) {
     if (transactionStarted) await connection.rollback();
     throw error;

@@ -234,7 +234,14 @@ export default function Dashboard({ section }: { section: Section }) {
     if (section !== "Team") setStaffSearch("");
   }, [section]);
 
-  const todayDuty = store.duties.find((duty) => duty.date === today);
+  const todayDuties = store.duties.filter((duty) => duty.date === today);
+  const todayDuty: Duty | undefined = todayDuties.length ? {
+    id: todayDuties.map((duty) => duty.id).join(","),
+    date: today,
+    staffIds: [...new Set(todayDuties.flatMap((duty) => duty.staffIds))],
+    taskIds: [...new Set(todayDuties.flatMap((duty) => duty.taskIds))],
+    completedTaskIds: [...new Set(todayDuties.flatMap((duty) => duty.completedTaskIds))],
+  } : undefined;
   const activeStaff = store.staff.filter((person) => person.active);
   const filteredStaff = useMemo(
     () => store.staff.filter((person) =>
@@ -488,8 +495,8 @@ export default function Dashboard({ section }: { section: Section }) {
     }
   }
 
-  const selectedDuty = store.duties.find((duty) => duty.date === selectedDate);
-  const selectedStaff = selectedDuty?.staffIds
+  const selectedDuties = store.duties.filter((duty) => duty.date === selectedDate);
+  const selectedStaff = [...new Set(selectedDuties.flatMap((duty) => duty.staffIds))]
     .map((id) => store.staff.find((person) => person.id === id))
     .filter((person): person is Staff => Boolean(person));
 
@@ -591,24 +598,35 @@ export default function Dashboard({ section }: { section: Section }) {
                 <section className="mt-6 grid gap-5 xl:grid-cols-[1.4fr_.9fr]">
                   <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
                     <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div><h2 className="text-base font-bold text-[#17233c]">Today’s cleaning team</h2><p className="mt-1 text-xs text-slate-500">{formatDate(today, { weekday: "long", month: "long", day: "numeric" })}</p></div>
+                      <div><h2 className="text-base font-bold text-[#17233c]">Today’s cleaning teams</h2><p className="mt-1 text-xs text-slate-500">{formatDate(today, { weekday: "long", month: "long", day: "numeric" })}</p></div>
+                      {todayDuties.length > 0 && <span className="rounded-full bg-indigo-50 px-3 py-1 text-[10px] font-semibold text-indigo-700">{todayDuties.length} {todayDuties.length === 1 ? "duty" : "duties"}</span>}
                     </div>
-                    {todayDuty ? (
-                      <>
-                        <div className="mt-5 flex flex-wrap gap-3">
-                          {todayDuty.staffIds.map((id) => store.staff.find((person) => person.id === id)).filter((person): person is Staff => Boolean(person)).map((person, index) => (
-                            <div key={person.id} className="flex min-w-[190px] flex-1 items-center gap-3 rounded-xl bg-[#f7f8fc] p-3">
-                              <Avatar name={person.name} color={["bg-indigo-100 text-indigo-700", "bg-emerald-100 text-emerald-700", "bg-amber-100 text-amber-700"][index % 3]} />
-                              <div className="min-w-0"><p className="truncate text-sm font-semibold">{person.name}</p><p className="truncate text-[11px] text-slate-500">{person.email}</p></div>
-                              <span className="ml-auto rounded-full bg-white px-2 py-1 text-[9px] font-semibold text-emerald-700">Assigned</span>
+                    {todayDuties.length > 0 ? (
+                      <div className="mt-5 space-y-4">
+                        {todayDuties.map((duty, dutyIndex) => {
+                          const dutyTasks = tasksForDuty(duty);
+                          return (
+                            <div key={duty.id} className="rounded-xl border border-slate-100 p-4">
+                              <div className="mb-3 flex items-center justify-between">
+                                <p className="text-xs font-bold text-slate-700">Duty {dutyIndex + 1}</p>
+                                <p className="text-[10px] font-semibold text-slate-500">{completedTaskCount(duty)} of {dutyTasks.length} complete</p>
+                              </div>
+                              <div className="flex flex-wrap gap-3">
+                                {duty.staffIds.map((id) => store.staff.find((person) => person.id === id)).filter((person): person is Staff => Boolean(person)).map((person, index) => (
+                                  <div key={person.id} className="flex min-w-[190px] flex-1 items-center gap-3 rounded-xl bg-[#f7f8fc] p-3">
+                                    <Avatar name={person.name} color={["bg-indigo-100 text-indigo-700", "bg-emerald-100 text-emerald-700", "bg-amber-100 text-amber-700"][index % 3]} />
+                                    <div className="min-w-0"><p className="truncate text-sm font-semibold">{person.name}</p><p className="truncate text-[11px] text-slate-500">{person.email}</p></div>
+                                    <span className="ml-auto rounded-full bg-white px-2 py-1 text-[9px] font-semibold text-emerald-700">Assigned</span>
+                                  </div>
+                                ))}
+                              </div>
+                              <div className="mt-4">
+                                <ProgressBar value={completedTaskCount(duty)} total={dutyTasks.length} />
+                              </div>
                             </div>
-                          ))}
-                        </div>
-                        <div className="mt-5 border-t border-slate-100 pt-4">
-                          <div className="mb-3 flex items-center justify-between"><p className="text-xs font-semibold text-slate-700">Today’s task progress</p><p className="text-[11px] font-semibold text-slate-500">{completedTaskCount(todayDuty)} of {todayTasks.length} complete</p></div>
-                          <ProgressBar value={completedTaskCount(todayDuty)} total={todayTasks.length} />
-                        </div>
-                      </>
+                          );
+                        })}
+                      </div>
                     ) : <EmptyState title="No team assigned yet" text="Add at least two staff members to today’s cleaning duty." action="Assign today’s duty" onClick={() => navigateToSection("Schedule", { date: today, newDuty: true })} />}
                   </div>
                   <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
@@ -619,19 +637,25 @@ export default function Dashboard({ section }: { section: Section }) {
                     </div>
                   </div>
                 </section>
-                <section className="mt-5 grid gap-5 xl:grid-cols-[1fr_.85fr]">
-                  <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
-                    <div className="flex items-center justify-between"><div><h2 className="text-base font-bold text-[#17233c]">Cleaning checklist</h2><p className="mt-1 text-xs text-slate-500">Tasks for today’s duty</p></div><span className="rounded-full bg-indigo-50 px-3 py-1 text-[10px] font-semibold text-indigo-700">{todayTasks.length} tasks</span></div>
-                    {todayDuty ? <div className="mt-4 space-y-1">{todayTasks.slice(0, 4).map((task) => <TaskRow key={task.id} task={task} done={todayDuty.completedTaskIds.includes(task.id)} onToggle={() => toggleTask(todayDuty, task.id)} />)}</div> : <p className="mt-5 text-sm text-slate-400">Assign a team to see their checklist.</p>}
+                <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6 mt-6">
+                    <div className="flex items-center justify-between"><div><h2 className="text-base font-bold text-[#17233c]">Cleaning checklists</h2><p className="mt-1 text-xs text-slate-500">Tasks for today’s duties</p></div><span className="rounded-full bg-indigo-50 px-3 py-1 text-[10px] font-semibold text-indigo-700">{todayDuties.length} {todayDuties.length === 1 ? "duty" : "duties"}</span></div>
+                    {todayDuties.length > 0 ? (
+                      <div className="mt-4 space-y-4">
+                        {todayDuties.map((duty, dutyIndex) => {
+                          const dutyTasks = tasksForDuty(duty);
+                          return (
+                            <div key={duty.id} className="rounded-xl border border-slate-100 p-3">
+                              <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">Duty {dutyIndex + 1}</p>
+                              {dutyTasks.length > 0 ? (
+                                <div className="space-y-1">{dutyTasks.slice(0, 4).map((task) => <TaskRow key={task.id} task={task} done={duty.completedTaskIds.includes(task.id)} onToggle={() => toggleTask(duty, task.id)} />)}</div>
+                              ) : <p className="text-xs text-slate-400">No active tasks assigned.</p>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : <p className="mt-5 text-sm text-slate-400">Assign a team to see their checklist.</p>}
                     <button onClick={() => navigateToSection("Checklist")} className="mt-4 w-full rounded-xl border border-slate-200 py-2.5 text-xs font-semibold text-slate-600 transition hover:border-indigo-200 hover:text-indigo-700">View all cleaning tasks</button>
-                  </div>
-                  <div className="rounded-2xl border border-[#dfe8ff] bg-[#f1f5ff] p-5 sm:p-6">
-                    <div className="flex items-start gap-3">
-                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white text-indigo-600 shadow-sm"><Icon name="mail" size={17} /></span>
-                      <div><p className="text-sm font-bold text-[#17233c]">Duty day reminders</p><p className="mt-1 text-xs leading-5 text-slate-600">Email reminders are scheduled for {formatTime(store.reminderTime)} Malaysia time on each duty day.</p></div>
-                    </div>
-                    <button onClick={() => navigateToSection("Reminders")} className="mt-4 text-xs font-bold text-indigo-700 hover:text-indigo-900">Configure reminders <span aria-hidden="true">→</span></button>
-                  </div>
+                   
                 </section>
               </>
             )}
@@ -1045,20 +1069,41 @@ function CalendarView({ mode, selectedDate, today, duties, staff, onSelect, onAd
     return dateKey(date);
   });
   if (mode === "Day") {
-    const duty = duties.find((item) => item.date === selectedDate);
-    const assigned = duty?.staffIds.map((id) => staff.find((person) => person.id === id)).filter((person): person is Staff => Boolean(person)) ?? [];
-    return <div><div className="mb-5 rounded-xl bg-[#f7f8fc] p-4"><p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Selected day</p><p className="mt-1 text-lg font-bold text-[#17233c]">{formatDate(selectedDate, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</p></div>{duty ? <div className="rounded-xl border border-indigo-100 bg-indigo-50/50 p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-bold text-slate-800">Office cleaning duty</p><p className="mt-1 text-xs text-slate-500">{assigned.length} team members assigned · {duty.taskIds.length} tasks</p></div><button onClick={() => onEdit(duty)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] font-semibold text-slate-600 hover:text-indigo-700"><Icon name="edit" size={13} />Edit assignment</button></div><div className="mt-4 flex flex-wrap gap-2">{assigned.map((person) => <span key={person.id} className="inline-flex items-center gap-2 rounded-full bg-white py-1 pl-1 pr-3 text-[11px] font-semibold text-slate-700"><Avatar name={person.name} size="h-6 w-6" />{person.name}</span>)}</div></div> : <EmptyState title="Nothing scheduled" text="Assign at least two active staff members to this date." action="Assign cleaning team" onClick={() => onAdd(selectedDate)} />}</div>;
+    const dayDuties = duties.filter((item) => item.date === selectedDate);
+    return <div>
+      <div className="mb-5 rounded-xl bg-[#f7f8fc] p-4"><p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Selected day</p><p className="mt-1 text-lg font-bold text-[#17233c]">{formatDate(selectedDate, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</p></div>
+      {dayDuties.length ? <div className="space-y-3">
+        {dayDuties.map((duty, dutyIndex) => {
+          const assigned = duty.staffIds.map((id) => staff.find((person) => person.id === id)).filter((person): person is Staff => Boolean(person));
+          return <div key={duty.id} className="rounded-xl border border-indigo-100 bg-indigo-50/50 p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div><p className="text-sm font-bold text-slate-800">Duty assignment {dutyIndex + 1}</p><p className="mt-1 text-xs text-slate-500">{assigned.length} team members assigned · {duty.taskIds.length} tasks</p></div>
+              <button onClick={() => onEdit(duty)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] font-semibold text-slate-600 hover:text-indigo-700"><Icon name="edit" size={13} />Edit assignment</button>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2">{assigned.map((person) => <span key={person.id} className="inline-flex items-center gap-2 rounded-full bg-white py-1 pl-1 pr-3 text-[11px] font-semibold text-slate-700"><Avatar name={person.name} size="h-6 w-6" />{person.name}</span>)}</div>
+          </div>;
+        })}
+      </div> : <EmptyState title="Nothing scheduled" text="Assign at least two active staff members to this date." action="Assign cleaning team" onClick={() => onAdd(selectedDate)} />}
+    </div>;
   }
   const weekDays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   return <div className={mode === "Month" ? "grid grid-cols-7 border-l border-t border-slate-100" : "grid grid-cols-1 gap-2 md:grid-cols-7"}>
     {mode === "Month" && weekDays.map((day) => <div key={day} className="border-b border-r border-slate-100 px-2 py-2 text-center text-[10px] font-bold uppercase text-slate-400">{day}</div>)}
     {dates.map((date) => {
-      const duty = duties.find((item) => item.date === date);
+      const dayDuties = duties.filter((item) => item.date === date);
       const isOutside = mode === "Month" && new Date(`${date}T12:00:00`).getMonth() !== selected.getMonth();
-      const assigned = duty?.staffIds.map((id) => staff.find((person) => person.id === id)).filter((person): person is Staff => Boolean(person)) ?? [];
       return <div key={date} className={`${mode === "Month" ? "min-h-[112px] border-b border-r border-slate-100 p-2" : "min-h-[190px] rounded-xl border border-slate-100 p-3"} ${isOutside ? "bg-slate-50/70" : "bg-white"} ${date === selectedDate ? "ring-2 ring-inset ring-indigo-300" : ""} ${mode === "Week" ? "hover:border-indigo-200 hover:bg-indigo-50/30" : ""}`}>
         <div className="flex items-center justify-between"><button onClick={(event) => { event.stopPropagation(); onSelect(date); }} className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold ${date === today ? "bg-[#172543] text-white" : isOutside ? "text-slate-300" : "text-slate-600"}`}>{new Date(`${date}T12:00:00`).getDate()}</button>{mode === "Week" && <button onClick={(event) => { event.stopPropagation(); onAdd(date); }} aria-label={`Add duty on ${date}`} className="flex h-6 w-6 items-center justify-center rounded-md text-slate-300 hover:bg-indigo-100 hover:text-indigo-700"><Icon name="plus" size={14} /></button>}</div>
-        {duty ? <button onClick={(event) => { event.stopPropagation(); onEdit(duty); }} className={`mt-2 w-full rounded-lg bg-[#eff5e7] p-2 text-left hover:bg-[#e6f1d8] ${mode === "Month" ? "p-1.5" : ""}`}><span className="block text-[9px] font-bold text-[#527337]">Cleaning crew</span><span className="mt-1 block truncate text-[10px] font-semibold text-slate-700">{assigned.map((person) => person.name.split(" ")[0]).join(", ")}</span>{mode === "Week" && <span className="mt-1 block text-[9px] text-slate-500">{duty.completedTaskIds.filter((id) => duty.taskIds.includes(id)).length}/{duty.taskIds.length} tasks done</span>}</button> : mode === "Week" && <button onClick={(event) => { event.stopPropagation(); onAdd(date); }} className="mt-3 text-[10px] text-slate-300 hover:text-indigo-600">+ Add duty</button>}
+        {dayDuties.length ? <div className="mt-2 space-y-1.5">
+          {dayDuties.map((duty, dutyIndex) => {
+            const assigned = duty.staffIds.map((id) => staff.find((person) => person.id === id)).filter((person): person is Staff => Boolean(person));
+            return <button key={duty.id} onClick={(event) => { event.stopPropagation(); onEdit(duty); }} className={`w-full rounded-lg bg-[#eff5e7] p-2 text-left hover:bg-[#e6f1d8] ${mode === "Month" ? "p-1.5" : ""}`}>
+              <span className="block text-[9px] font-bold text-[#527337]">Duty {dutyIndex + 1}</span>
+              <span className="mt-1 block truncate text-[10px] font-semibold text-slate-700">{assigned.map((person) => person.name.split(" ")[0]).join(", ")}</span>
+              {mode === "Week" && <span className="mt-1 block text-[9px] text-slate-500">{duty.completedTaskIds.filter((id) => duty.taskIds.includes(id)).length}/{duty.taskIds.length} tasks done</span>}
+            </button>;
+          })}
+        </div> : mode === "Week" && <button onClick={(event) => { event.stopPropagation(); onAdd(date); }} className="mt-3 text-[10px] text-slate-300 hover:text-indigo-600">+ Add duty</button>}
       </div>;
     })}
   </div>;
